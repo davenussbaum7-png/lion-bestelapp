@@ -8,16 +8,13 @@ import requests
 import pandas as pd
 from urllib.parse import quote
 
-# ── Auth check — alleen admins mogen hier komen ───────────────────────────────
-if "logged_in" not in st.session_state or not st.session_state.get("logged_in"):
-    st.warning("Je bent niet ingelogd. Ga terug naar de hoofdpagina.")
-    if st.button("← Naar inlogpagina"):
-        st.switch_page("app.py")
-    st.stop()
+# ── Auth check — alleen beheer (Wouter) mag hier komen ───────────────────────
+# Niet ingelogd → direct naar loginpagina sturen
+if not st.session_state.get("ingelogd_als"):
+    st.switch_page("app.py")
 
-# Controleer admin-rol (pas "admin" aan als jouw rol anders heet in session_state)
-gebruiker_rol = st.session_state.get("rol") or st.session_state.get("role") or ""
-if str(gebruiker_rol).lower() != "admin":
+# Ingelogd als winkel → blokkeren
+if st.session_state.get("rol") != "beheer":
     st.error("🔒  Geen toegang. Deze pagina is alleen voor beheerders.")
     st.stop()
 
