@@ -18,8 +18,18 @@ def get_client() -> Client:
 def laad_artikelen():
     """Laad alle artikelen uit de catalogus (gecached, 1 uur geldig)."""
     db = get_client()
-    resultaat = db.table("articles").select("*").order("volgorde").execute()
-    return resultaat.data
+    alle = []
+    offset = 0
+    while True:
+        resultaat = db.table("articles").select("*").order("volgorde").range(offset, offset + 999).execute()
+        data = resultaat.data
+        if not data:
+            break
+        alle.extend(data)
+        offset += len(data)
+        if len(data) < 1000:
+            break
+    return alle
 
 
 # ─── Bestellingen lezen ───────────────────────────────────────────────────────
