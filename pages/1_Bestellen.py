@@ -24,9 +24,21 @@ from utils.database import (
     sla_bestelling_op, sla_dbo_op,
 )
 
+# ─── Stijl ────────────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+/* Compactere artikelrijen */
+.art-label { font-size: 0.92rem; font-weight: 600; margin: 0; line-height: 1.3; }
+/* Verberg Streamlit's eigen label van number_input */
+div[data-testid="stNumberInput"] label { display: none; }
+/* Minder ruimte tussen elementen in expanders */
+.stExpander div[data-testid="stVerticalBlock"] { gap: 0.2rem; }
+</style>
+""", unsafe_allow_html=True)
+
 # ─── Data laden ───────────────────────────────────────────────────────────────
-artikelen_db  = laad_artikelen()
-opgeslagen    = laad_bestelling(winkelnaam)
+artikelen_db   = laad_artikelen()
+opgeslagen     = laad_bestelling(winkelnaam)
 dbo_opgeslagen = laad_dbo_bestelling(winkelnaam)
 
 # ─── Header ───────────────────────────────────────────────────────────────────
@@ -44,23 +56,26 @@ st.markdown("Vul de aantallen in die je wilt bestellen. Klik daarna op **Sla bes
 st.markdown("---")
 
 # ─── Zoekbalk ─────────────────────────────────────────────────────────────────
-zoekterm = st.text_input("🔍 Zoek op artikelnaam, sectie of EAN", placeholder="bijv. Jersey of 872...")
+zoekterm = st.text_input("🔍 Zoek op artikelnaam, sectie of EAN",
+                         placeholder="bijv. Claudia 140 of Jersey...")
 
-# ─── Artikelen filteren ───────────────────────────────────────────────────────
+# ─── Artikelen filteren (meerdere zoekwoorden) ────────────────────────────────
 if zoekterm.strip():
-    z = zoekterm.strip().lower()
+    woorden = zoekterm.strip().lower().split()
     gefilterd = [
         a for a in artikelen_db
-        if z in (a.get("artikel") or "").lower()
-        or z in (a.get("sectie") or "").lower()
-        or z in (a.get("ean") or "").lower()
+        if all(
+            w in (a.get("artikel") or "").lower()
+            or w in (a.get("sectie") or "").lower()
+            or w in (a.get("ean") or "").lower()
+            for w in woorden
+        )
     ]
 else:
     gefilterd = artikelen_db
 
 # ─── Bestellingen formulier ───────────────────────────────────────────────────
-# Verzamel nieuwe aantallen in een dict
-nieuwe_orders = dict(opgeslagen)  # begin met wat al opgeslagen is
+nieuwe_orders = dict(opgeslagen)
 
 # Groepeer per sectie
 secties = {}
@@ -72,16 +87,27 @@ totaal_ingevuld = sum(v for v in nieuwe_orders.values() if v > 0)
 st.info(f"**{totaal_ingevuld} stuks** ingevuld in huidige bestelling")
 
 with st.form("bestelformulier"):
+
+    # ── Knop bovenaan ────────────────────────────────────────────────────────
+    opslaan_top = st.form_submit_button(
+        "💾 Sla bestelling op",
+        type="primary",
+        use_container_width=True,
+    )
+
+    st.markdown("---")
+
     for sectie, artikelen_sectie in secties.items():
         with st.expander(f"📦 {sectie} ({len(artikelen_sectie)} artikelen)", expanded=False):
             for art in artikelen_sectie:
-                ean     = art["ean"]
-                label   = art["artikel"]
-                huidig  = opgeslagen.get(ean, 0) or 0
+                ean    = art["ean"]
+                label  = art["artikel"]
+                huidig = opgeslagen.get(ean, 0) or 0
 
-                col_art, col_num = st.columns([4, 1])
+                col_art, col_num = st.columns([5, 1])
                 with col_art:
-                    st.markdown(f"**{label}**  \n<small style='color:gray'>{ean}</small>",
+                    # Alleen artikelnaam, geen EAN zichtbaar
+                    st.markdown(f"<p class='art-label'>{label}</p>",
                                 unsafe_allow_html=True)
                 with col_num:
                     val = st.number_input(
@@ -110,14 +136,13 @@ with st.form("bestelformulier"):
     for sectie_dbo in dbo_secties:
         with st.expander(f"📝 {sectie_dbo}", expanded=False):
             bestaande_regels = dbo_bestaand.get(sectie_dbo, [])
-            # Altijd minstens 5 lege rijen tonen, plus bestaande
             n_rijen = max(5, len(bestaande_regels) + 2)
             for i in range(n_rijen):
                 bestaand = bestaande_regels[i] if i < len(bestaande_regels) else {}
                 c1, c2 = st.columns([4, 1])
                 with c1:
                     art_val = st.text_input(
-                        f"Artikel",
+                        "Artikel",
                         value=bestaand.get("artikel", ""),
                         key=f"dbo_art_{sectie_dbo}_{i}",
                         label_visibility="collapsed",
@@ -125,7 +150,7 @@ with st.form("bestelformulier"):
                     )
                 with c2:
                     qty_val = st.number_input(
-                        f"Aantal",
+                        "Aantal",
                         min_value=0,
                         max_value=999,
                         value=bestaand.get("quantity", 0) or 0,
@@ -134,19 +159,21 @@ with st.form("bestelformulier"):
                     )
                 if art_val.strip() and qty_val > 0:
                     nieuwe_dbo.append({
-                        "sectie": sectie_dbo,
-                        "artikel": art_val.strip(),
+                        "sectie":   sectie_dbo,
+                        "artikel":  art_val.strip(),
                         "quantity": qty_val,
                     })
 
     st.markdown("---")
+
+    # ── Knop onderaan ────────────────────────────────────────────────────────
     opslaan = st.form_submit_button(
         "💾 Sla bestelling op",
         type="primary",
         use_container_width=True,
     )
 
-if opslaan:
+if opslaan or opslaan_top:
     sla_bestelling_op(winkelnaam, nieuwe_orders)
     sla_dbo_op(winkelnaam, nieuwe_dbo)
     ingevuld = sum(1 for v in nieuwe_orders.values() if v > 0) + len(nieuwe_dbo)
