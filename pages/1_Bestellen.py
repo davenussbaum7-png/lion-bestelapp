@@ -33,6 +33,28 @@ st.markdown("""
 div[data-testid="stNumberInput"] label { display: none; }
 /* Minder ruimte tussen elementen in expanders */
 .stExpander div[data-testid="stVerticalBlock"] { gap: 0.2rem; }
+
+/* ── Sticky floating save button ─────────────────────────────────────────── */
+div[data-testid="stFormSubmitButton"] {
+    position: fixed;
+    bottom: 1.5rem;
+    right: 1.5rem;
+    z-index: 9999;
+    width: auto !important;
+}
+div[data-testid="stFormSubmitButton"] button {
+    min-width: 220px !important;
+    width: auto !important;
+    padding: 0.65rem 1.75rem !important;
+    font-size: 1rem !important;
+    font-weight: 600 !important;
+    border-radius: 10px !important;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28) !important;
+}
+/* Extra ruimte onderaan zodat content niet achter de knop verdwijnt */
+section.main > div.block-container {
+    padding-bottom: 6rem !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -161,7 +183,6 @@ with st.form("bestelformulier"):
     opslaan = st.form_submit_button(
         "💾 Sla bestelling op",
         type="primary",
-        use_container_width=True,
     )
 
 if opslaan:
