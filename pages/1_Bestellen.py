@@ -88,15 +88,6 @@ st.info(f"**{totaal_ingevuld} stuks** ingevuld in huidige bestelling")
 
 with st.form("bestelformulier"):
 
-    # ── Knop bovenaan ────────────────────────────────────────────────────────
-    opslaan_top = st.form_submit_button(
-        "💾 Sla bestelling op",
-        type="primary",
-        use_container_width=True,
-    )
-
-    st.markdown("---")
-
     for sectie, artikelen_sectie in secties.items():
         with st.expander(f"📦 {sectie} ({len(artikelen_sectie)} artikelen)", expanded=False):
             for art in artikelen_sectie:
@@ -173,7 +164,7 @@ with st.form("bestelformulier"):
         use_container_width=True,
     )
 
-if opslaan or opslaan_top:
+if opslaan:
     sla_bestelling_op(winkelnaam, nieuwe_orders)
     sla_dbo_op(winkelnaam, nieuwe_dbo)
     ingevuld = sum(1 for v in nieuwe_orders.values() if v > 0) + len(nieuwe_dbo)
