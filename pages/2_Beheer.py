@@ -20,9 +20,9 @@ if st.session_state.get("rol") != "beheer":
 from utils.database import (
     laad_artikelen, laad_alle_bestellingen, laad_alle_dbo_bestellingen,
     laad_alle_sap, sla_sap_op, bestelling_status,
-    reset_alle_bestellingen, reset_winkel_bestellingen,
+    reset_alle_bestellingen, reset_winkel_bestellingen, update_pad_codes,
 )
-from utils.genereer import bouw_artikellijst, schrijf_piklijst, schrijf_paklijst, lees_sap_xlsx
+from utils.genereer import bouw_artikellijst, schrijf_piklijst, schrijf_paklijst, lees_sap_xlsx, lees_padcodes_xlsx
 
 # ─── Header ───────────────────────────────────────────────────────────────────
 col1, col2 = st.columns([3, 1])
@@ -69,6 +69,41 @@ if sap_bestanden:
                 st.error(f"❌ {bestand.name}: winkelnaam of data niet herkend")
         if succes:
             st.info(f"{succes} SAP-bestand(en) verwerkt.")
+st.markdown("---")
+
+# ─── Padcodes uploaden ────────────────────────────────────────────────────────
+st.subheader("🗺️ Padcodes uploaden")
+st.caption(
+    "Upload een Excel met kolommen **EAN** en **Pad_code** om de padnummers in de catalogus bij te werken. "
+    "Na het uploaden worden de piklijsten automatisch per pad gegroepeerd."
+)
+with st.expander("📋 Vereist Excel-formaat", expanded=False):
+    st.markdown("""
+Minimaal twee kolommen (kolomnamen worden automatisch herkend):
+
+| EAN | Pad_code |
+|-----|----------|
+| 121201532 | A1 |
+| 121201534 | A1 |
+| 8719727167355 | B3 |
+
+Kolomnamen die worden herkend: `EAN`, `Artikelnummer`, `Barcode` voor EAN
+en `Pad_code`, `Padcode`, `Pad`, `Pad_nr` voor het padnummer.
+""")
+padcode_bestand = st.file_uploader(
+    "Selecteer padcodes-bestand (.xlsx)",
+    type=["xlsx"],
+    key="padcode_upload",
+)
+if padcode_bestand:
+    if st.button("🗺️ Verwerk padcodes", type="primary"):
+        pad_codes = lees_padcodes_xlsx(padcode_bestand.read())
+        if not pad_codes:
+            st.error("❌ Geen padcodes gevonden. Controleer of de Excel kolommen 'EAN' en 'Pad_code' bevat.")
+        else:
+            bijgewerkt = update_pad_codes(pad_codes)
+            st.success(f"✅ {bijgewerkt} artikelen bijgewerkt met padcodes.")
+            st.info("De artikelcache is geleegd — nieuwe piklijsten gebruiken meteen de nieuwe padcodes.")
 st.markdown("---")
 
 # ─── Piklijsten genereren ────────────────────────────────────────────────────
