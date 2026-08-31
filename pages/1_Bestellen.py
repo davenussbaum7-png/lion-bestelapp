@@ -7,7 +7,7 @@ from PIL import Image
 
 # ─── Page config met logo ─────────────────────────────────────────────────────
 _logo_path = None
-for _p in ["logo.png", "logo.jpg", "logo.jpeg"]:
+for _p in ["Lion.nl.jpg", "logo.png", "logo.jpg", "logo.jpeg"]:
     import os
     if os.path.exists(_p):
         _logo_path = _p
