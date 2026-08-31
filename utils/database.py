@@ -28,6 +28,21 @@ def get_client() -> Client:
 
 # ─── Artikelen ────────────────────────────────────────────────────────────────
 
+def update_pad_codes(pad_codes: dict):
+    """
+    Update pad_code voor bestaande artikelen.
+    pad_codes = {ean: pad_code}
+    """
+    db = get_client()
+    bijgewerkt = 0
+    for ean, pad in pad_codes.items():
+        if pad:
+            db.table("articles").update({"pad_code": pad}).eq("ean", ean).execute()
+            bijgewerkt += 1
+    laad_artikelen.clear()
+    return bijgewerkt
+
+
 @st.cache_data(ttl=3600)
 def laad_artikelen():
     """Laad alle artikelen uit de catalogus (gecached, 1 uur geldig)."""
