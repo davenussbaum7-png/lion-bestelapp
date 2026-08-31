@@ -6,6 +6,22 @@ import streamlit as st
 from supabase import create_client, Client
 
 
+def _retry(func, max_pogingen=3):
+    """
+    Voer een callable uit met retry bij netwerk- of verbindingsfouten.
+    Gebruik: _retry(lambda: db.table(...).execute())
+    """
+    laatste_fout = None
+    for poging in range(max_pogingen):
+        try:
+            return func()
+        except Exception as fout:
+            laatste_fout = fout
+            if poging < max_pogingen - 1:
+                time.sleep(2 ** poging)   # 1s, dan 2s
+    raise laatste_fout
+
+
 @st.cache_resource(ttl=3600)
 def get_client() -> Client:
     """
@@ -50,7 +66,7 @@ def laad_artikelen():
     alle = []
     offset = 0
     while True:
-        resultaat = db.table("articles").select("*").order("volgorde").range(offset, offset + 999).execute()
+        resultaat = _retry(lambda o=offset: db.table("articles").select("*").order("volgorde").range(o, o + 999).execute())
         data = resultaat.data
         if not data:
             break
@@ -66,27 +82,27 @@ def laad_artikelen():
 def laad_bestelling(winkelnaam: str) -> dict:
     """Geeft {ean: quantity} dict voor de winkel."""
     db = get_client()
-    rows = db.table("store_orders") \
-             .select("ean, quantity") \
-             .eq("store_name", winkelnaam) \
-             .execute()
+    rows = _retry(lambda: db.table("store_orders")
+                             .select("ean, quantity")
+                             .eq("store_name", winkelnaam)
+                             .execute())
     return {r["ean"]: r["quantity"] for r in rows.data}
 
 
 def laad_dbo_bestelling(winkelnaam: str) -> list:
     """Geeft lijst van DBO-regels voor de winkel."""
     db = get_client()
-    rows = db.table("dbo_orders") \
-             .select("*") \
-             .eq("store_name", winkelnaam) \
-             .execute()
+    rows = _retry(lambda: db.table("dbo_orders")
+                             .select("*")
+                             .eq("store_name", winkelnaam)
+                             .execute())
     return rows.data
 
 
 def laad_alle_bestellingen() -> dict:
     """Geeft {winkelnaam: {ean: quantity}} voor alle winkels."""
     db = get_client()
-    rows = db.table("store_orders").select("store_name, ean, quantity").execute()
+    rows = _retry(lambda: db.table("store_orders").select("store_name, ean, quantity").execute())
     result = {}
     for r in rows.data:
         result.setdefault(r["store_name"], {})[r["ean"]] = r["quantity"]
@@ -226,7 +242,7 @@ def reset_winkel_bestellingen(winkel_namen: list):
 @st.cache_data(ttl=300)
 def laad_winkels() -> list:
     db = get_client()
-    rows = db.table("stores").select("name, pin").order("name").execute()
+    rows = _retry(lambda: db.table("stores").select("name, pin").order("name").execute())
     return rows.data
 
 
