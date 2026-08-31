@@ -3,10 +3,18 @@ Lion Beddenshop — Winkelformulier
 Winkels vullen hier hun wekelijkse bestelling in.
 """
 import streamlit as st
+from PIL import Image
+
+# ─── Page config met logo ─────────────────────────────────────────────────────
+try:
+    _logo_img = Image.open("logo.png")
+    _page_icon = _logo_img
+except Exception:
+    _page_icon = "🛏️"
 
 st.set_page_config(
     page_title="Bestellen — Lion Beddenshop",
-    page_icon="🛏️",
+    page_icon=_page_icon,
     layout="wide",
 )
 
@@ -43,13 +51,21 @@ div[data-testid="stFormSubmitButton"] {
     width: auto !important;
 }
 div[data-testid="stFormSubmitButton"] button {
-    min-width: 220px !important;
+    min-width: 240px !important;
     width: auto !important;
-    padding: 0.65rem 1.75rem !important;
-    font-size: 1rem !important;
-    font-weight: 600 !important;
+    padding: 0.75rem 2rem !important;
+    font-size: 1.05rem !important;
+    font-weight: 700 !important;
     border-radius: 10px !important;
-    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28) !important;
+    background-color: #CC0000 !important;
+    color: #ffffff !important;
+    border: none !important;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45) !important;
+    letter-spacing: 0.02em !important;
+}
+div[data-testid="stFormSubmitButton"] button:hover {
+    background-color: #aa0000 !important;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55) !important;
 }
 /* Extra ruimte onderaan zodat content niet achter de knop verdwijnt */
 section.main > div.block-container {
@@ -64,10 +80,18 @@ opgeslagen     = laad_bestelling(winkelnaam)
 dbo_opgeslagen = laad_dbo_bestelling(winkelnaam)
 
 # ─── Header ───────────────────────────────────────────────────────────────────
-col1, col2 = st.columns([3, 1])
-with col1:
-    st.title(f"🛏️ Bestelling — {winkelnaam}")
-with col2:
+col_logo, col_title, col_logout = st.columns([1, 6, 2])
+
+with col_logo:
+    try:
+        st.image("logo.png", width=72)
+    except Exception:
+        st.markdown("🛏️")
+
+with col_title:
+    st.title(f"Bestelling — {winkelnaam}")
+
+with col_logout:
     st.markdown("<br>", unsafe_allow_html=True)
     if st.button("Uitloggen", use_container_width=True):
         st.session_state.rol = None
@@ -119,7 +143,6 @@ with st.form("bestelformulier"):
 
                 col_art, col_num = st.columns([5, 1])
                 with col_art:
-                    # Alleen artikelnaam, geen EAN zichtbaar
                     st.markdown(f"<p class='art-label'>{label}</p>",
                                 unsafe_allow_html=True)
                 with col_num:
@@ -181,7 +204,7 @@ with st.form("bestelformulier"):
 
     # ── Knop onderaan ────────────────────────────────────────────────────────
     opslaan = st.form_submit_button(
-        "💾 Sla bestelling op",
+        "💾  Sla bestelling op",
         type="primary",
     )
 
