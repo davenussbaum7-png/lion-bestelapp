@@ -52,16 +52,15 @@ div[data-testid="stNumberInput"] label { display: none; }
 /* ── Sticky floating save button ─────────────────────────────────────────── */
 div[data-testid="stFormSubmitButton"] {
     position: fixed;
-    top: 4.8rem;
-    right: 1.5rem;
+    top: 13rem;
+    left: 0.5rem;
     z-index: 9999;
-    width: auto !important;
+    width: 13rem !important;
 }
 div[data-testid="stFormSubmitButton"] button {
-    min-width: 220px !important;
-    width: auto !important;
-    padding: 0.6rem 1.75rem !important;
-    font-size: 1rem !important;
+    width: 100% !important;
+    padding: 0.6rem 1rem !important;
+    font-size: 0.95rem !important;
     font-weight: 700 !important;
     border-radius: 8px !important;
     background-color: #CC0000 !important;
