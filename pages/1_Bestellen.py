@@ -54,8 +54,31 @@ footer { display: none !important; }
 
 # ─── Data laden ───────────────────────────────────────────────────────────────
 artikelen_db   = laad_artikelen()
-opgeslagen     = laad_bestelling(winkelnaam)
 dbo_opgeslagen = laad_dbo_bestelling(winkelnaam)
+
+# ─── Session state initialiseren (eenmalig vanuit DB bij eerste laad) ─────────
+# Gebruik een vlag zodat DB-waarden alleen worden geladen als er nog geen
+# invoer in de sessie zit — zo worden ingevulde waarden nooit overschreven.
+if f"_geladen_{winkelnaam}" not in st.session_state:
+    opgeslagen = laad_bestelling(winkelnaam)
+    for art in artikelen_db:
+        ean = art["ean"]
+        st.session_state[f"art_{ean}"] = opgeslagen.get(ean, 0) or 0
+    # DBO-velden initialiseren
+    dbo_secties_init = ["01 1 PERS.DBO", "02 2 PERS.DBO", "03 3 Pers.DBO", "04 260 BR.DBO"]
+    dbo_bestaand_init = {}
+    for r in dbo_opgeslagen:
+        dbo_bestaand_init.setdefault(r["sectie"], []).append(r)
+    for sectie_dbo in dbo_secties_init:
+        bestaande = dbo_bestaand_init.get(sectie_dbo, [])
+        n_rijen = max(5, len(bestaande) + 2)
+        for i in range(n_rijen):
+            b = bestaande[i] if i < len(bestaande) else {}
+            if f"dbo_art_{sectie_dbo}_{i}" not in st.session_state:
+                st.session_state[f"dbo_art_{sectie_dbo}_{i}"] = b.get("artikel", "")
+            if f"dbo_qty_{sectie_dbo}_{i}" not in st.session_state:
+                st.session_state[f"dbo_qty_{sectie_dbo}_{i}"] = b.get("quantity", 0) or 0
+    st.session_state[f"_geladen_{winkelnaam}"] = True
 
 # ─── Header ───────────────────────────────────────────────────────────────────
 col_logo, col_title, col_knoppen = st.columns([1, 5, 2])
@@ -104,9 +127,9 @@ else:
 
 # ─── Totaal teller ────────────────────────────────────────────────────────────
 totaal_ingevuld = sum(
-    st.session_state.get(f"art_{a['ean']}", opgeslagen.get(a["ean"], 0) or 0)
+    st.session_state.get(f"art_{a['ean']}", 0)
     for a in artikelen_db
-    if st.session_state.get(f"art_{a['ean']}", opgeslagen.get(a["ean"], 0) or 0) > 0
+    if st.session_state.get(f"art_{a['ean']}", 0) > 0
 )
 st.info(f"**{totaal_ingevuld} stuks** ingevuld in huidige bestelling")
 
@@ -119,9 +142,8 @@ for art in gefilterd:
 for sectie, artikelen_sectie in secties.items():
     with st.expander(f"📦 {sectie} ({len(artikelen_sectie)} artikelen)", expanded=False):
         for art in artikelen_sectie:
-            ean    = art["ean"]
-            label  = art["artikel"]
-            huidig = opgeslagen.get(ean, 0) or 0
+            ean   = art["ean"]
+            label = art["artikel"]
 
             col_art, col_num = st.columns([5, 1])
             with col_art:
@@ -132,7 +154,6 @@ for sectie, artikelen_sectie in secties.items():
                     label=f"_{ean}",
                     min_value=0,
                     max_value=999,
-                    value=huidig,
                     step=1,
                     label_visibility="collapsed",
                     key=f"art_{ean}",
@@ -142,9 +163,9 @@ st.markdown("---")
 
 # ─── DBO-secties ──────────────────────────────────────────────────────────────
 dbo_secties = ["01 1 PERS.DBO", "02 2 PERS.DBO", "03 3 Pers.DBO", "04 260 BR.DBO"]
-dbo_bestaand = {r["sectie"]: [] for r in dbo_opgeslagen}
+dbo_bestaand = {}
 for r in dbo_opgeslagen:
-    dbo_bestaand[r["sectie"]].append(r)
+    dbo_bestaand.setdefault(r["sectie"], []).append(r)
 
 st.subheader("DBO — Vrije invoer")
 st.caption("Artikelen die niet in de lijst staan. Typ de naam en het aantal.")
@@ -154,12 +175,10 @@ for sectie_dbo in dbo_secties:
         bestaande_regels = dbo_bestaand.get(sectie_dbo, [])
         n_rijen = max(5, len(bestaande_regels) + 2)
         for i in range(n_rijen):
-            bestaand = bestaande_regels[i] if i < len(bestaande_regels) else {}
             c1, c2 = st.columns([4, 1])
             with c1:
                 st.text_input(
                     "Artikel",
-                    value=bestaand.get("artikel", ""),
                     key=f"dbo_art_{sectie_dbo}_{i}",
                     label_visibility="collapsed",
                     placeholder="Artikelnaam...",
@@ -169,7 +188,6 @@ for sectie_dbo in dbo_secties:
                     "Aantal",
                     min_value=0,
                     max_value=999,
-                    value=bestaand.get("quantity", 0) or 0,
                     key=f"dbo_qty_{sectie_dbo}_{i}",
                     label_visibility="collapsed",
                 )
