@@ -6,8 +6,15 @@ import streamlit as st
 from PIL import Image
 
 # ─── Page config met logo ─────────────────────────────────────────────────────
+_logo_path = None
+for _p in ["logo.png", "logo.jpg", "logo.jpeg"]:
+    import os
+    if os.path.exists(_p):
+        _logo_path = _p
+        break
+
 try:
-    _logo_img = Image.open("logo.png")
+    _logo_img = Image.open(_logo_path)
     _page_icon = _logo_img
 except Exception:
     _page_icon = "🛏️"
@@ -83,9 +90,9 @@ dbo_opgeslagen = laad_dbo_bestelling(winkelnaam)
 col_logo, col_title, col_logout = st.columns([1, 6, 2])
 
 with col_logo:
-    try:
-        st.image("logo.png", width=72)
-    except Exception:
+    if _logo_path:
+        st.image(_logo_path, width=72)
+    else:
         st.markdown("🛏️")
 
 with col_title:
