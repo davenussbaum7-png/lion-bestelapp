@@ -77,7 +77,6 @@ def laad_alle_dbo_bestellingen() -> dict:
 def bestelling_status() -> list:
     """Geeft per winkel het aantal ingevulde regels."""
     db = get_client()
-    # Aantal regels per winkel
     rows = db.table("store_orders") \
              .select("store_name, quantity") \
              .gt("quantity", 0) \
@@ -85,7 +84,6 @@ def bestelling_status() -> list:
     counts = {}
     for r in rows.data:
         counts[r["store_name"]] = counts.get(r["store_name"], 0) + 1
-    # Alle winkels ophalen voor volledig overzicht
     winkels = db.table("stores").select("name").order("name").execute()
     return [
         {"winkel": w["name"], "regels": counts.get(w["name"], 0)}
@@ -101,9 +99,7 @@ def sla_bestelling_op(winkelnaam: str, orders: dict):
     Nul-regels worden verwijderd.
     """
     db = get_client()
-    # Verwijder alle bestaande regels voor deze winkel
     db.table("store_orders").delete().eq("store_name", winkelnaam).execute()
-    # Voeg nieuwe regels in (alleen > 0)
     rijen = [
         {"store_name": winkelnaam, "ean": ean, "quantity": qty}
         for ean, qty in orders.items()
@@ -167,6 +163,14 @@ def reset_alle_bestellingen():
     db = get_client()
     db.table("store_orders").delete().neq("id", 0).execute()
     db.table("dbo_orders").delete().neq("id", 0).execute()
+
+
+def reset_winkel_bestellingen(winkel_namen: list):
+    """Verwijder bestellingen van geselecteerde winkels."""
+    db = get_client()
+    for naam in winkel_namen:
+        db.table("store_orders").delete().eq("store_name", naam).execute()
+        db.table("dbo_orders").delete().eq("store_name", naam).execute()
 
 
 # ─── Winkels ─────────────────────────────────────────────────────────────────
