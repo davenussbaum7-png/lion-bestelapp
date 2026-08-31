@@ -130,13 +130,32 @@ def sla_dbo_op(winkelnaam: str, dbo_regels: list):
 def sla_sap_op(winkelnaam: str, sap_data: list):
     """sap_data = [{ean, artikel, stuks_verkocht, voorraad_centraal}]"""
     db = get_client()
-    db.table("sap_data").delete().eq("store_name", winkelnaam).execute()
-    rijen = [
-        {"store_name": winkelnaam, **r}
-        for r in sap_data
-    ]
+    # Dedupleer op EAN (zelfde EAN in meerdere secties samenvoegen)
+    gezien = {}
+    for r in sap_data:
+        ean = r.get("ean")
+        if ean not in gezien:
+            gezien[ean] = {"store_name": winkelnaam, **r}
+        else:
+            # Stuks optellen bij duplicaat EAN
+            gezien[ean]["stuks_verkocht"] = (
+                gezien[ean].get("stuks_verkocht", 0) + r.get("stuks_verkocht", 0)
+            )
+    rijen = list(gezien.values())
     if rijen:
-        db.table("sap_data").insert(rijen).execute()
+        # Upsert: insert of update als (store_name, ean) al bestaat
+        db.table("sap_data").upsert(
+            rijen, on_conflict="store_name,ean"
+        ).execute()
+        # Verwijder daarna regels die niet meer in de nieuwe upload zitten
+        nieuwe_eans = [r["ean"] for r in rijen]
+        db.table("sap_data") \
+          .delete() \
+          .eq("store_name", winkelnaam) \
+          .not_.in_("ean", nieuwe_eans) \
+          .execute()
+    else:
+        db.table("sap_data").delete().eq("store_name", winkelnaam).execute()
 
 
 def laad_sap(winkelnaam: str) -> dict:
