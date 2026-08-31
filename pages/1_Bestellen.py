@@ -215,8 +215,12 @@ if opslaan:
                     "quantity": qty_val,
                 })
 
-    sla_bestelling_op(winkelnaam, nieuwe_orders)
-    sla_dbo_op(winkelnaam, nieuwe_dbo)
-    ingevuld = sum(1 for v in nieuwe_orders.values() if v > 0) + len(nieuwe_dbo)
-    st.success(f"✅ Bestelling opgeslagen! {ingevuld} regels ingevuld.")
-    st.balloons()
+    try:
+        sla_bestelling_op(winkelnaam, nieuwe_orders)
+        sla_dbo_op(winkelnaam, nieuwe_dbo)
+        ingevuld = sum(1 for v in nieuwe_orders.values() if v > 0) + len(nieuwe_dbo)
+        st.success(f"✅ Bestelling opgeslagen! {ingevuld} regels ingevuld.")
+        st.toast("✅ Opgeslagen!", icon="💾")
+    except Exception as fout:
+        st.error(f"❌ Fout bij opslaan: {fout}")
+        st.info("Ververs de pagina en probeer opnieuw. Als het probleem blijft, neem contact op met Wouter.")
