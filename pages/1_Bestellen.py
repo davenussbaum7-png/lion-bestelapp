@@ -52,31 +52,27 @@ div[data-testid="stNumberInput"] label { display: none; }
 /* ── Sticky floating save button ─────────────────────────────────────────── */
 div[data-testid="stFormSubmitButton"] {
     position: fixed;
-    bottom: 1.5rem;
+    top: 4.8rem;
     right: 1.5rem;
     z-index: 9999;
     width: auto !important;
 }
 div[data-testid="stFormSubmitButton"] button {
-    min-width: 240px !important;
+    min-width: 220px !important;
     width: auto !important;
-    padding: 0.75rem 2rem !important;
-    font-size: 1.05rem !important;
+    padding: 0.6rem 1.75rem !important;
+    font-size: 1rem !important;
     font-weight: 700 !important;
-    border-radius: 10px !important;
+    border-radius: 8px !important;
     background-color: #CC0000 !important;
     color: #ffffff !important;
     border: none !important;
-    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45) !important;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35) !important;
     letter-spacing: 0.02em !important;
 }
 div[data-testid="stFormSubmitButton"] button:hover {
     background-color: #aa0000 !important;
-    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55) !important;
-}
-/* Extra ruimte onderaan zodat content niet achter de knop verdwijnt */
-section.main > div.block-container {
-    padding-bottom: 6rem !important;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45) !important;
 }
 </style>
 """, unsafe_allow_html=True)
