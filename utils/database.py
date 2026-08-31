@@ -1,15 +1,29 @@
 """
 Supabase database verbinding en helpers.
 """
+import time
 import streamlit as st
 from supabase import create_client, Client
 
 
-@st.cache_resource
+@st.cache_resource(ttl=3600)
 def get_client() -> Client:
-    url = st.secrets["supabase_url"]
-    key = st.secrets["supabase_key"]
-    return create_client(url, key)
+    """
+    Verbinding met Supabase. Probeert 3 keer bij opstartproblemen.
+    TTL van 1 uur zorgt dat een slechte verbinding zichzelf herstelt.
+    """
+    laatste_fout = None
+    for poging in range(3):
+        try:
+            url = st.secrets["supabase_url"]
+            key = st.secrets["supabase_key"]
+            client = create_client(url, key)
+            return client
+        except Exception as fout:
+            laatste_fout = fout
+            if poging < 2:
+                time.sleep(2 ** poging)   # wacht 1s, daarna 2s
+    raise laatste_fout
 
 
 # ─── Artikelen ────────────────────────────────────────────────────────────────
@@ -202,7 +216,14 @@ def laad_winkels() -> list:
 
 
 def controleer_pin(winkelnaam: str, pin: str) -> bool:
-    winkels = laad_winkels()
+    try:
+        winkels = laad_winkels()
+    except Exception:
+        # Verbindingsfout: cache leegmaken zodat de volgende poging opnieuw probeert
+        st.cache_resource.clear()
+        st.cache_data.clear()
+        st.error("⚠️ Verbindingsprobleem. Ververs de pagina en probeer opnieuw.")
+        return False
     for w in winkels:
         if w["name"].lower() == winkelnaam.lower():
             return w["pin"] == pin
