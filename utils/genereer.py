@@ -51,6 +51,23 @@ def bouw_artikellijst(winkelnaam, orders, dbo_orders, sap_data, artikelen_db):
         p = a.get("pad_code")
         if s and p and s not in sectie_pad:
             sectie_pad[s] = p
+
+    def normalize_pad_code(raw):
+        """Normaliseer pad_code naar canonical vorm.
+        '01 1 PERS.DBO' → '1', '03 3 Pers.DBO' → '3', '3A' → '3A', 'MATRASSEN' → ''
+        """
+        if not raw:
+            return ""
+        raw = str(raw).strip()
+        # Al correct: "1", "3A", "13A", "15a"
+        if re.match(r'^\d+[A-Za-z]*$', raw):
+            return raw
+        # Sectienaam met 1-2 cijfer prefix gevolgd door spatie: "01 1 PERS.DBO" → "1"
+        m = re.match(r'^(\d{1,2})\s', raw)
+        if m:
+            return str(int(m.group(1)))
+        return ""
+
     bestelde_eans = set(orders.keys())
     resultaat = []
     # 1. Winkelbestellingen
@@ -68,7 +85,7 @@ def bouw_artikellijst(winkelnaam, orders, dbo_orders, sap_data, artikelen_db):
             "ean":        ean,
             "artikel":    cat.get("artikel") or sap.get("artikel") or ean,
             "sectie":     cat.get("sectie") or sap.get("groepsnaam") or "",
-            "pad_code":   cat.get("pad_code") or "",
+            "pad_code":   normalize_pad_code(cat.get("pad_code") or ""),
             "volgorde":   cat.get("volgorde") or 9999,
             "besteld":    besteld,
             "sap":        stuks,
@@ -86,12 +103,13 @@ def bouw_artikellijst(winkelnaam, orders, dbo_orders, sap_data, artikelen_db):
         if voorraad is None:
             voorraad = 999
         sectie_sap = cat.get("sectie") or sap.get("groepsnaam") or ""
+        raw_pad_sap = cat.get("pad_code") or sectie_pad.get(sectie_sap) or sectie_sap
         resultaat.append({
             "type":       "SAP",
             "ean":        ean,
             "artikel":    cat.get("artikel") or sap.get("artikel") or ean,
             "sectie":     sectie_sap,
-            "pad_code":   cat.get("pad_code") or sectie_pad.get(sectie_sap) or "",
+            "pad_code":   normalize_pad_code(raw_pad_sap),
             "volgorde":   cat.get("volgorde") or 9999,
             "besteld":    0,
             "sap":        stuks,
@@ -103,12 +121,14 @@ def bouw_artikellijst(winkelnaam, orders, dbo_orders, sap_data, artikelen_db):
         if qty <= 0:
             continue
         sectie_dbo = dbo.get("sectie", "DBO")
+        # Gebruik sectie_pad lookup, dan sectienaam zelf als fallback voor pad-afleiding
+        raw_pad_dbo = sectie_pad.get(sectie_dbo) or sectie_dbo
         resultaat.append({
             "type":       "DBO",
             "ean":        None,
             "artikel":    dbo.get("artikel", ""),
             "sectie":     sectie_dbo,
-            "pad_code":   sectie_pad.get(sectie_dbo) or "",
+            "pad_code":   normalize_pad_code(raw_pad_dbo),
             "volgorde":   -1,  # DBO secties 01-04 bovenaan
             "besteld":    qty,
             "sap":        0,
