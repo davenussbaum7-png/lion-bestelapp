@@ -220,6 +220,70 @@ def laad_alle_sap() -> dict:
     return result
 
 
+# ─── Piklijst-correcties ──────────────────────────────────────────────────────
+
+def sla_piklijst_correcties_op(winkelnaam: str, artikelen_lijst: list):
+    """
+    Sla piklijst-data op als startpunt voor correcties.
+    artikelen_lijst = output van bouw_artikellijst()
+    Overschrijft bestaande correcties voor deze winkel.
+    """
+    db = get_client()
+    db.table("piklijst_correcties").delete().eq("winkelnaam", winkelnaam).execute()
+    rijen = []
+    for art in artikelen_lijst:
+        totaal = (art.get("besteld") or 0) + (art.get("sap") or 0)
+        if totaal <= 0:
+            continue
+        rijen.append({
+            "winkelnaam":        winkelnaam,
+            "ean":               art.get("ean") or None,
+            "artikel":           art.get("artikel") or "",
+            "sectie":            art.get("sectie") or "",
+            "pad_code":          art.get("pad_code") or "",
+            "piklijst_aantal":   totaal,
+            "definitief_aantal": totaal,   # start gelijk aan piklijst
+        })
+    if rijen:
+        db.table("piklijst_correcties").insert(rijen).execute()
+
+
+def laad_piklijst_correcties(winkelnaam: str) -> list:
+    """Geeft correctie-regels voor een winkel: [{id, ean, artikel, sectie, pad_code, piklijst_aantal, definitief_aantal}]"""
+    db = get_client()
+    rows = _retry(lambda: db.table("piklijst_correcties")
+                             .select("*")
+                             .eq("winkelnaam", winkelnaam)
+                             .order("pad_code")
+                             .order("artikel")
+                             .execute())
+    return rows.data
+
+
+def sla_definitief_op(winkelnaam: str, correcties: list):
+    """
+    Sla definitieve aantallen op.
+    correcties = [{id, definitief_aantal}]
+    """
+    db = get_client()
+    for c in correcties:
+        db.table("piklijst_correcties") \
+          .update({"definitief_aantal": c["definitief_aantal"]}) \
+          .eq("id", c["id"]) \
+          .eq("winkelnaam", winkelnaam) \
+          .execute()
+
+
+def laad_winkels_met_correcties() -> list:
+    """Geeft lijst van winkelnamen die correctie-regels hebben."""
+    db = get_client()
+    rows = _retry(lambda: db.table("piklijst_correcties")
+                             .select("winkelnaam")
+                             .execute())
+    namen = sorted({r["winkelnaam"] for r in rows.data})
+    return namen
+
+
 # ─── Reset ───────────────────────────────────────────────────────────────────
 
 def reset_alle_bestellingen():
