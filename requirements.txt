@@ -3,3 +3,4 @@ requests
 pandas
 supabase
 openpyxl
+reportlab>=4.0
