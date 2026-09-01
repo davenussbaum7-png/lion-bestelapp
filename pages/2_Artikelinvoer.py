@@ -2,18 +2,15 @@
 Artikelinvoer — Lion Beddenshop
 Beheer artikelen in Supabase (als pagina binnen de bestelapp).
 """
-
+import re
 import streamlit as st
 import requests
 import pandas as pd
 from urllib.parse import quote
 
 # ── Auth check — alleen beheer (Wouter) mag hier komen ───────────────────────
-# Niet ingelogd → direct naar loginpagina sturen
 if not st.session_state.get("ingelogd_als"):
     st.switch_page("app.py")
-
-# Ingelogd als winkel → blokkeren
 if st.session_state.get("rol") != "beheer":
     st.error("🔒  Geen toegang. Deze pagina is alleen voor beheerders.")
     st.stop()
@@ -25,7 +22,6 @@ SUPABASE_KEY = (
     ".eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZ1aWlkenRxcm13b3F3ZXJndXJrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc4NDkxNzksImV4cCI6MjEwMzQyNTE3OX0"
     ".ioolw5fVSWpC4KREhrTW0Pcqex4qEAUd8YEukVCtmrY"
 )
-
 HDR_GET = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
 HDR_WRITE = {
     **HDR_GET,
@@ -34,7 +30,6 @@ HDR_WRITE = {
 }
 
 # ── Supabase functies ─────────────────────────────────────────────────────────
-
 @st.cache_data(ttl=30, show_spinner=False)
 def laad_alle_artikelen():
     alle = []
@@ -55,14 +50,12 @@ def laad_alle_artikelen():
             break
     return alle
 
-
 def patch_artikelen(filter_str: str, velden: dict):
     return requests.patch(
         f"{SUPABASE_URL}/rest/v1/articles?{filter_str}",
         headers=HDR_WRITE,
         json=velden,
     )
-
 
 def insert_batch(batch: list):
     return requests.post(
@@ -71,15 +64,19 @@ def insert_batch(batch: list):
         json=batch,
     )
 
-
 # ── Hulpfuncties ──────────────────────────────────────────────────────────────
+def pad_sort_key(x):
+    """Sorteert padnummers numeriek: 1, 2, 2A, 3, 3A, 4, 4A, 12, 13A ipv 1, 12, 13A, 2, 2A..."""
+    m = re.match(r'^(\d+)([A-Za-z]*)$', str(x).strip())
+    if m:
+        return (int(m.group(1)), m.group(2).upper())
+    return (9999, str(x))
 
 def volgorde_uit_sectie(sectie: str) -> int:
     try:
         return int(sectie.strip().split()[0].lstrip("0") or "0")
     except Exception:
         return 0
-
 
 def parse_excel_plak(tekst: str) -> list[dict]:
     """Verwerk tab- of komma-gescheiden tekst geplakt vanuit Excel."""
@@ -101,12 +98,9 @@ def parse_excel_plak(tekst: str) -> list[dict]:
         rijen.append({"ean": ean, "artikel": artikel})
     return rijen
 
-
 # ── Pagina ────────────────────────────────────────────────────────────────────
-
 st.title("🛏  Artikelinvoer")
 
-# Herladen
 col_info, col_btn = st.columns([6, 1])
 with col_btn:
     if st.button("↻  Herladen", use_container_width=True):
@@ -125,7 +119,6 @@ with st.spinner("Verbinden met Supabase..."):
         st.stop()
 
 bestaande_eans = {a["ean"] for a in artikelen}
-
 secties_dict: dict[str, str] = {}
 for a in artikelen:
     s = (a.get("sectie") or "").strip()
@@ -133,9 +126,10 @@ for a in artikelen:
     if s and s not in secties_dict:
         secties_dict[s] = p
 
+# Numeriek gesorteerde padnummers: 1, 2, 2A, 3, 3A, 4, 4A, 4B, 5, 5A, 7, 12, 13A...
 pad_codes = sorted(
     {str(a.get("pad_code") or "").strip() for a in artikelen if a.get("pad_code")},
-    key=lambda x: int(x) if x.isdigit() else 9999,
+    key=pad_sort_key,
 )
 
 with col_info:
@@ -153,11 +147,9 @@ tab1, tab2 = st.tabs(["➕  Artikelen invoeren", "✏️  Padnummer wijzigen"])
 # TAB 1 — INVOEREN
 # ════════════════════════════════════════════════════════════════════════════
 with tab1:
-
     st.markdown("### 1.  Sectie kiezen of aanmaken")
     sectie_opties = ["── Nieuwe sectie aanmaken ──"] + sorted(secties_dict.keys())
     sectie_keuze = st.selectbox("Sectie", sectie_opties, key="inv_sectie_keuze")
-
     if "Nieuwe sectie" in sectie_keuze:
         sectie = st.text_input("Naam nieuwe sectie", placeholder="bijv. 35 BADMATTEN",
                                key="inv_nieuwe_sectie").strip()
@@ -166,13 +158,10 @@ with tab1:
 
     st.markdown("### 2.  Padnummer kiezen of aanmaken")
     pad_opties = ["── Nieuw pad aanmaken ──"] + pad_codes
-
     default_pad_idx = 0
     if sectie in secties_dict and secties_dict[sectie] in pad_opties:
         default_pad_idx = pad_opties.index(secties_dict[sectie])
-
     pad_keuze = st.selectbox("Padnummer", pad_opties, index=default_pad_idx, key="inv_pad_keuze")
-
     if "Nieuw pad" in pad_keuze:
         pad = st.text_input("Nieuw padnummer", placeholder="bijv. 26", key="inv_nieuw_pad").strip()
     else:
@@ -183,7 +172,6 @@ with tab1:
 
     st.markdown("### 3.  Artikelen plakken vanuit Excel")
     st.caption("Selecteer in Excel: **Kolom A = EAN-code**  |  **Kolom B = Artikelnaam**  — Ctrl+C en hieronder plakken")
-
     plak_tekst = st.text_area(
         "Geplakte artikelen",
         height=160,
@@ -191,7 +179,6 @@ with tab1:
         placeholder="8712345678901\tCLAUDIA SINGLE THERMO\n8712345678902\tCLAUDIA 2-PERSOONS WIT",
         label_visibility="collapsed",
     )
-
     col_check, col_wis = st.columns([2, 1])
     with col_check:
         controleer = st.button("🔍  Controleer & preview", type="primary", use_container_width=True)
@@ -211,7 +198,6 @@ with tab1:
             fout = "Voer een padnummer in."
         elif not plak_tekst.strip():
             fout = "Plak eerst artikelen in het tekstvak."
-
         if fout:
             st.error(fout)
         else:
@@ -243,20 +229,16 @@ with tab1:
         te_inv   = st.session_state["te_invoegen_data"]
         n_nieuw  = sum(1 for r in preview if "Nieuw" in r["Status"])
         n_dubbel = sum(1 for r in preview if "aanwezig" in r["Status"])
-
         st.markdown("### 4.  Preview")
         col_n, col_d = st.columns(2)
         col_n.success(f"✅  {n_nieuw} nieuw")
         col_d.warning(f"⚠️  {n_dubbel} overgeslagen (al aanwezig)")
-
         df = pd.DataFrame(preview)
         def kleur(rij):
             if "Nieuw" in rij["Status"]:
                 return ["background-color:#c8f7c5; color:#1a1a1a"] * len(rij)
             return ["background-color:#ffc8c8; color:#1a1a1a"] * len(rij)
-
         st.dataframe(df.style.apply(kleur, axis=1), use_container_width=True, hide_index=True)
-
         if n_nieuw > 0:
             sectie_lbl = st.session_state.get("inv_sectie_label", "")
             pad_lbl    = st.session_state.get("inv_pad_label", "")
@@ -277,13 +259,11 @@ with tab1:
                         fouten += len(batch)
                         st.warning(f"Batch fout {resp.status_code}: {resp.text[:200]}")
                     prog.progress(min((i + BATCH) / len(te_inv), 1.0))
-
                 prog.empty()
                 if fouten == 0:
                     st.success(f"✅  {ingevoegd} artikelen succesvol toegevoegd aan de database!")
                 else:
                     st.warning(f"{ingevoegd} ingevoegd  |  {fouten} mislukt.")
-
                 del st.session_state["preview_data"]
                 del st.session_state["te_invoegen_data"]
                 st.cache_data.clear()
@@ -295,21 +275,16 @@ with tab1:
 # TAB 2 — WIJZIGEN
 # ════════════════════════════════════════════════════════════════════════════
 with tab2:
-
     st.markdown("### Padnummer wijzigen voor een volledige sectie")
-
     wijk_sectie = st.selectbox("Sectie", sorted(secties_dict.keys()), key="wijk_sectie")
-
     if wijk_sectie:
         huidig_pad   = secties_dict.get(wijk_sectie, "—")
         aantal_art   = sum(1 for a in artikelen if a.get("sectie") == wijk_sectie)
         col_a, col_b = st.columns(2)
         col_a.info(f"Huidig padnummer: **{huidig_pad}**")
         col_b.info(f"Artikelen in deze sectie: **{aantal_art}**")
-
     wijk_nieuw_pad = st.text_input("Nieuw padnummer", key="wijk_nieuw_pad",
                                    placeholder="bijv. 14")
-
     if st.button("✅  Wijzig padnummer voor deze sectie", type="primary"):
         if not wijk_sectie:
             st.error("Selecteer een sectie.")
@@ -333,11 +308,8 @@ with tab2:
                 st.error(f"Fout {resp.status_code}: {resp.text[:300]}")
 
     st.divider()
-
     st.markdown("### Padnummer wijzigen voor één artikel (op EAN-code)")
-
     ean_input = st.text_input("EAN-code", key="ean_input", placeholder="bijv. 8712345678901")
-
     gevonden = None
     if ean_input.strip():
         gevonden = next((a for a in artikelen if a.get("ean") == ean_input.strip()), None)
@@ -348,10 +320,8 @@ with tab2:
             )
         else:
             st.warning("EAN-code niet gevonden in de database.")
-
     ean_nieuw_pad = st.text_input("Nieuw padnummer", key="ean_nieuw_pad",
                                    placeholder="bijv. 14")
-
     if st.button("✅  Wijzig padnummer voor dit artikel", type="primary", key="btn_ean"):
         if not ean_input.strip():
             st.error("Voer een EAN-code in.")
