@@ -3,6 +3,7 @@ Genereer piklijsten en paklijsten vanuit web-bestellingen.
 Gebaseerd op verwerk.py logica, aangepast voor webapp-gebruik.
 """
 import io
+import re
 import zipfile
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
@@ -104,8 +105,16 @@ def bouw_artikellijst(winkelnaam, orders, dbo_orders, sap_data, artikelen_db):
             "sap":        0,
             "op_voorraad": True,
         })
-    # Sorteren: pad_code eerst, dan volgorde → artikel
-    resultaat.sort(key=lambda a: (a["pad_code"] or "ZZZ", a["volgorde"], a["artikel"]))
+    # Sorteren: pad_code numerisch (1, 2, 2A, 3, 12 ipv 1, 12, 2, 3...)
+    def pad_sort_key(code):
+        if not code:
+            return (9999, "")
+        m = re.match(r'^(\d+)([A-Za-z]*)$', str(code).strip())
+        if m:
+            return (int(m.group(1)), m.group(2).upper())
+        return (9999, str(code))
+
+    resultaat.sort(key=lambda a: (pad_sort_key(a["pad_code"]), a["volgorde"], a["artikel"]))
     return resultaat
 # ─── Piklijst schrijven ───────────────────────────────────────────────────────
 def schrijf_piklijst(winkelnaam, artikelen):
