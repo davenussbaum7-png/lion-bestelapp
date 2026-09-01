@@ -44,6 +44,13 @@ def bouw_artikellijst(winkelnaam, orders, dbo_orders, sap_data, artikelen_db):
     """
     # EAN → catalogus-info
     catalogus = {a["ean"]: a for a in artikelen_db if a.get("ean")}
+    # Sectie → pad_code mapping (voor DBO en SAP-items zonder EAN in catalogus)
+    sectie_pad = {}
+    for a in artikelen_db:
+        s = a.get("sectie")
+        p = a.get("pad_code")
+        if s and p and s not in sectie_pad:
+            sectie_pad[s] = p
     bestelde_eans = set(orders.keys())
     resultaat = []
     # 1. Winkelbestellingen
@@ -78,12 +85,13 @@ def bouw_artikellijst(winkelnaam, orders, dbo_orders, sap_data, artikelen_db):
         voorraad = sap.get("voorraad_centraal", 999)
         if voorraad is None:
             voorraad = 999
+        sectie_sap = cat.get("sectie") or sap.get("groepsnaam") or ""
         resultaat.append({
             "type":       "SAP",
             "ean":        ean,
             "artikel":    cat.get("artikel") or sap.get("artikel") or ean,
-            "sectie":     cat.get("sectie") or sap.get("groepsnaam") or "",
-            "pad_code":   cat.get("pad_code") or "",
+            "sectie":     sectie_sap,
+            "pad_code":   cat.get("pad_code") or sectie_pad.get(sectie_sap) or "",
             "volgorde":   cat.get("volgorde") or 9999,
             "besteld":    0,
             "sap":        stuks,
@@ -94,12 +102,13 @@ def bouw_artikellijst(winkelnaam, orders, dbo_orders, sap_data, artikelen_db):
         qty = dbo.get("quantity", 0) or 0
         if qty <= 0:
             continue
+        sectie_dbo = dbo.get("sectie", "DBO")
         resultaat.append({
             "type":       "DBO",
             "ean":        None,
             "artikel":    dbo.get("artikel", ""),
-            "sectie":     dbo.get("sectie", "DBO"),
-            "pad_code":   "",
+            "sectie":     sectie_dbo,
+            "pad_code":   sectie_pad.get(sectie_dbo) or "",
             "volgorde":   -1,  # DBO secties 01-04 bovenaan
             "besteld":    qty,
             "sap":        0,
