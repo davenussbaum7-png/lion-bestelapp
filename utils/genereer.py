@@ -159,7 +159,7 @@ def schrijf_piklijst(winkelnaam, artikelen):
     ws.print_title_rows       = "1:3"
     ws.page_margins.left = ws.page_margins.right = 0.4
     ws.page_margins.top  = ws.page_margins.bottom = 0.5
-    for i, breedte in enumerate([5, 20, 42, 8, 8, 8, 8, 16, 28], 1):
+    for i, breedte in enumerate([5, 28, 57, 8, 8, 8, 8, 14, 26], 1):
         ws.column_dimensions[get_column_letter(i)].width = breedte
     # Titel
     ws.merge_cells("A1:I1")
