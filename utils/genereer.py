@@ -340,6 +340,280 @@ def schrijf_paklijst(winkelnaam, piklijst_bytes):
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
+# ─── Piklijst PDF ────────────────────────────────────────────────────────────
+def schrijf_piklijst_pdf(winkelnaam, artikelen):
+    """Genereert piklijst als PDF-bytes (A4 liggend)."""
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib.units import mm
+    from reportlab.lib import colors
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, PageBreak, Spacer
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.enums import TA_CENTER
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=landscape(A4),
+        leftMargin=10*mm, rightMargin=10*mm,
+        topMargin=10*mm, bottomMargin=10*mm,
+    )
+
+    C_KOP   = colors.HexColor("#1C1C1C")
+    C_SECT  = colors.HexColor("#C0C0C0")
+    C_ZEBRA = colors.HexColor("#F5F5F5")
+    C_ROOD  = colors.HexColor("#FFE8E8")
+
+    def ps(name, **kw):
+        d = dict(fontSize=8, leading=10, fontName="Helvetica", spaceAfter=0, spaceBefore=0)
+        d.update(kw)
+        return ParagraphStyle(name, **d)
+
+    s_norm   = ps("n")
+    s_ital   = ps("i", fontName="Helvetica-Oblique")
+    s_bold   = ps("b", fontName="Helvetica-Bold")
+    s_center = ps("c", alignment=TA_CENTER)
+    s_hdr    = ps("h", fontSize=9, fontName="Helvetica-Bold",
+                  textColor=colors.white, alignment=TA_CENTER)
+    s_sect   = ps("s", fontSize=9, fontName="Helvetica-Bold", leftIndent=4)
+    s_titel  = ps("t", fontSize=13, fontName="Helvetica-Bold",
+                  textColor=colors.white, alignment=TA_CENTER, leading=16)
+    s_leg    = ps("l", fontSize=7, fontName="Helvetica-Oblique",
+                  textColor=colors.HexColor("#555555"))
+
+    # Kolombreedtes: Pad Sectie Artikel Besteld SAP Totaal Gepakt EAN Opmerking
+    # Totaal = 277mm (A4 liggend - 2*10mm marge)
+    CW = [c * mm for c in [8, 46, 98, 13, 13, 13, 13, 26, 47]]
+    HDRS = ["Pad", "Sectie", "Artikel", "Besteld", "SAP", "Totaal", "Gepakt □", "EAN", "Opmerking"]
+
+    def header_row():
+        return [Paragraph(h, s_hdr) for h in HDRS]
+
+    # Titel-tabel bovenaan elke pagina (gebouwd als los Table per pad-groep)
+    def titel_tabel():
+        t = Table(
+            [[Paragraph(f"PIKLIJST — {winkelnaam.upper()}", s_titel)],
+             [Paragraph("VET + dikke rand = NIET OP VOORRAAD   |   Cursief = SAP aanvulling of DBO vrije invoer", s_leg)]],
+            colWidths=[sum(CW)],
+        )
+        t.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), C_KOP),
+            ("BACKGROUND", (0, 1), (-1, 1), colors.HexColor("#F0F0F0")),
+            ("ROWHEIGHT",  (0, 0), (-1, 0), 20),
+            ("ROWHEIGHT",  (0, 1), (-1, 1), 12),
+            ("VALIGN",     (0, 0), (-1, -1), "MIDDLE"),
+        ]))
+        return t
+
+    # Groepeer per pad_code
+    pad_groups: dict[str, list] = {}
+    for art in artikelen:
+        key = art.get("pad_code") or ""
+        pad_groups.setdefault(key, []).append(art)
+
+    story = []
+    first = True
+
+    for pad_code, items in pad_groups.items():
+        if not first:
+            story.append(PageBreak())
+        first = False
+
+        story.append(titel_tabel())
+        story.append(Spacer(1, 2*mm))
+
+        rows = [header_row()]
+        sect_rows: list[int] = []   # rij-indices van sectiekoppen
+        niet_vv_rows: list[int] = []
+        dbo_sap_rows: list[int] = []
+        zebra_rows: list[int] = []
+        zebra = True
+        huidige_sectie = None
+
+        for art in items:
+            sectie = art.get("sectie") or ""
+            if sectie != huidige_sectie:
+                huidige_sectie = sectie
+                ri = len(rows)
+                rows.append([Paragraph(f"  {sectie}", s_sect)] + [""] * 8)
+                sect_rows.append(ri)
+                zebra = True
+
+            niet_vv = not art["op_voorraad"] and art["sap"] > 0
+            is_dbo  = art["type"] == "DBO"
+            is_sap  = art["type"] == "SAP" and art["besteld"] == 0
+
+            if niet_vv:
+                opmerking, st = "!!! NIET OP VOORRAAD", s_bold
+            elif is_dbo or is_sap:
+                opmerking = "DBO — vrije invoer" if is_dbo else "SAP aanvulling"
+                st = s_ital
+            else:
+                opmerking, st = "", s_norm
+
+            besteld_v = art["besteld"] or ""
+            sap_v     = art["sap"] if art["sap"] else ""
+            totaal_v  = (art["besteld"] or 0) + (art["sap"] or 0)
+
+            ri = len(rows)
+            rows.append([
+                Paragraph(pad_code, s_center),
+                Paragraph(sectie, st),
+                Paragraph(art["artikel"] or "", st),
+                Paragraph(str(besteld_v), s_center) if besteld_v != "" else "",
+                Paragraph(str(sap_v),     s_center) if sap_v     != "" else "",
+                Paragraph(str(totaal_v),  s_center) if totaal_v       else "",
+                "",
+                Paragraph(str(art["ean"] or ""), s_center),
+                Paragraph(opmerking, st),
+            ])
+            if niet_vv:
+                niet_vv_rows.append(ri)
+            elif is_dbo or is_sap:
+                dbo_sap_rows.append(ri)
+            elif zebra:
+                zebra_rows.append(ri)
+            zebra = not zebra
+
+        ts = [
+            # Header
+            ("BACKGROUND", (0, 0), (-1, 0), C_KOP),
+            ("FONTNAME",   (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE",   (0, 0), (-1, 0), 9),
+            ("ALIGN",      (0, 0), (-1, 0), "CENTER"),
+            # Algemeen
+            ("VALIGN",     (0, 0), (-1, -1), "MIDDLE"),
+            ("FONTSIZE",   (0, 1), (-1, -1), 8),
+            ("ROWHEIGHT",  (0, 0), (-1, -1), 14),
+            ("GRID",       (0, 0), (-1, -1), 0.3, colors.HexColor("#CCCCCC")),
+        ]
+        for ri in sect_rows:
+            ts += [
+                ("BACKGROUND", (0, ri), (-1, ri), C_SECT),
+                ("FONTNAME",   (0, ri), (-1, ri), "Helvetica-Bold"),
+                ("SPAN",       (0, ri), (-1, ri)),
+                ("BOX",        (0, ri), (-1, ri), 0.8, colors.HexColor("#888888")),
+            ]
+        for ri in niet_vv_rows:
+            ts += [
+                ("BACKGROUND", (0, ri), (-1, ri), C_ROOD),
+                ("FONTNAME",   (0, ri), (-1, ri), "Helvetica-Bold"),
+                ("BOX",        (0, ri), (-1, ri), 1.0, colors.black),
+            ]
+        for ri in zebra_rows:
+            ts.append(("BACKGROUND", (0, ri), (-1, ri), C_ZEBRA))
+
+        tbl = Table(rows, colWidths=CW, repeatRows=1)
+        tbl.setStyle(TableStyle(ts))
+        story.append(tbl)
+
+    # Totaalregel als laatste
+    totaal_stuks = sum((a["besteld"] or 0) + (a["sap"] or 0) for a in artikelen)
+    niet_vv_n    = sum(1 for a in artikelen if not a["op_voorraad"] and a["sap"] > 0)
+    story.append(Spacer(1, 3*mm))
+    story.append(Paragraph(
+        f"<b>TOTAAL: {totaal_stuks} stuks  |  {len(artikelen)} regels  |  {niet_vv_n} NIET OP VOORRAAD</b>",
+        ps("tot", fontSize=9),
+    ))
+
+    doc.build(story)
+    return buf.getvalue()
+
+
+# ─── Paklijst PDF ─────────────────────────────────────────────────────────────
+def schrijf_paklijst_pdf(winkelnaam, correcties):
+    """
+    Genereert paklijst als PDF-bytes (A4 staand).
+    correcties: [{ean, artikel, definitief_aantal}]
+    """
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import mm
+    from reportlab.lib import colors
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.enums import TA_CENTER
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=A4,
+        leftMargin=15*mm, rightMargin=15*mm,
+        topMargin=12*mm, bottomMargin=12*mm,
+    )
+
+    C_KOP   = colors.HexColor("#1C1C1C")
+    C_ZEBRA = colors.HexColor("#F5F5F5")
+
+    def ps(name, **kw):
+        d = dict(fontSize=9, leading=11, fontName="Helvetica", spaceAfter=0, spaceBefore=0)
+        d.update(kw)
+        return ParagraphStyle(name, **d)
+
+    s_norm   = ps("n")
+    s_center = ps("c", alignment=TA_CENTER)
+    s_hdr    = ps("h", fontSize=10, fontName="Helvetica-Bold",
+                  textColor=colors.white, alignment=TA_CENTER)
+    s_titel  = ps("t", fontSize=14, fontName="Helvetica-Bold",
+                  textColor=colors.white, alignment=TA_CENTER, leading=18)
+
+    # Usable width A4 staand: 210 - 2*15 = 180mm
+    CW = [c * mm for c in [28, 112, 20]]  # EAN, Omschrijving, Aantal = 160mm + ruimte
+
+    # Filter en sorteer op EAN
+    items = [c for c in correcties if (c.get("definitief_aantal") or 0) > 0]
+    def pak_sort(a):
+        try:   return (0, int(a["ean"]), a["artikel"])
+        except: return (1, 0, a["artikel"])
+    items = sorted(items, key=pak_sort)
+
+    story = []
+
+    # Titel
+    tit = Table(
+        [[Paragraph(f"PAKLIJST — {winkelnaam.upper()}", s_titel)]],
+        colWidths=[sum(CW)],
+    )
+    tit.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), C_KOP),
+        ("ROWHEIGHT",  (0, 0), (-1, -1), 22),
+        ("VALIGN",     (0, 0), (-1, -1), "MIDDLE"),
+    ]))
+    story.append(tit)
+    story.append(Spacer(1, 2*mm))
+
+    rows = [[Paragraph(h, s_hdr) for h in ["EAN", "Omschrijving", "Aantal"]]]
+    for i, art in enumerate(items):
+        zebra = i % 2 == 1
+        rows.append([
+            Paragraph(str(art.get("ean") or "—"), s_center),
+            Paragraph(str(art.get("artikel") or ""), s_norm),
+            Paragraph(str(art.get("definitief_aantal") or ""), s_center),
+        ])
+
+    ts = [
+        ("BACKGROUND", (0, 0), (-1, 0), C_KOP),
+        ("FONTSIZE",   (0, 0), (-1, 0), 10),
+        ("ALIGN",      (0, 0), (-1, 0), "CENTER"),
+        ("VALIGN",     (0, 0), (-1, -1), "MIDDLE"),
+        ("FONTSIZE",   (0, 1), (-1, -1), 9),
+        ("ROWHEIGHT",  (0, 0), (-1, -1), 15),
+        ("GRID",       (0, 0), (-1, -1), 0.3, colors.HexColor("#CCCCCC")),
+    ]
+    for i in range(1, len(rows)):
+        if i % 2 == 0:
+            ts.append(("BACKGROUND", (0, i), (-1, i), C_ZEBRA))
+
+    tbl = Table(rows, colWidths=CW, repeatRows=1)
+    tbl.setStyle(TableStyle(ts))
+    story.append(tbl)
+
+    story.append(Spacer(1, 3*mm))
+    story.append(Paragraph(
+        f"<b>TOTAAL: {sum(a.get('definitief_aantal', 0) for a in items)} stuks  |  {len(items)} regels</b>",
+        ps("tot", fontSize=9),
+    ))
+
+    doc.build(story)
+    return buf.getvalue()
+
+
 # ─── SAP xlsx inlezen ────────────────────────────────────────────────────────
 def lees_sap_xlsx(bestand_bytes) -> tuple:
     """
