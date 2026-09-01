@@ -1,9 +1,8 @@
 """
 Lion Beddenshop — Beheerpagina (Wouter)
-SAP uploaden, piklijsten genereren, paklijsten genereren, reset.
+SAP uploaden, piklijsten genereren (PDF), correcties invoeren, paklijsten genereren (PDF), reset.
 """
 import io
-import zipfile
 import streamlit as st
 st.set_page_config(
     page_title="Beheer — Lion Beddenshop",
@@ -21,8 +20,13 @@ from utils.database import (
     laad_artikelen, laad_alle_bestellingen, laad_alle_dbo_bestellingen,
     laad_alle_sap, sla_sap_op, bestelling_status,
     reset_alle_bestellingen, reset_winkel_bestellingen, update_pad_codes,
+    sla_piklijst_correcties_op, laad_piklijst_correcties,
+    sla_definitief_op, laad_winkels_met_correcties,
 )
-from utils.genereer import bouw_artikellijst, schrijf_piklijst, schrijf_paklijst, lees_sap_xlsx, lees_padcodes_xlsx
+from utils.genereer import (
+    bouw_artikellijst, schrijf_piklijst_pdf, schrijf_paklijst_pdf,
+    lees_sap_xlsx, lees_padcodes_xlsx,
+)
 
 # ─── Header ───────────────────────────────────────────────────────────────────
 col1, col2 = st.columns([3, 1])
@@ -106,75 +110,194 @@ if padcode_bestand:
             st.info("De artikelcache is geleegd — nieuwe piklijsten gebruiken meteen de nieuwe padcodes.")
 st.markdown("---")
 
-# ─── Piklijsten genereren ────────────────────────────────────────────────────
+# ─── Stap 1 — Piklijsten genereren (PDF) ────────────────────────────────────
 st.subheader("📋 Stap 1 — Piklijsten genereren")
-st.caption("Genereert piklijsten voor alle winkels met ingevulde bestellingen.")
-if st.button("🖨️ Genereer alle piklijsten (download ZIP)", type="primary", use_container_width=True):
+st.caption(
+    "Genereert piklijsten als PDF voor alle winkels met ingevulde bestellingen. "
+    "De aantallen worden automatisch opgeslagen zodat je ze in Stap 2 kunt corrigeren."
+)
+
+if st.button("🖨️ Genereer alle piklijsten", type="primary", use_container_width=True):
     artikelen_db = laad_artikelen()
     alle_orders  = laad_alle_bestellingen()
     alle_dbo     = laad_alle_dbo_bestellingen()
     alle_sap     = laad_alle_sap()
-    zip_buf = io.BytesIO()
+
+    piklijsten = {}   # {winkelnaam: pdf_bytes}
     n_gemaakt = 0
-    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for winkelnaam, orders in alle_orders.items():
-            if not any(v > 0 for v in orders.values()):
-                continue
-            dbo    = alle_dbo.get(winkelnaam, [])
-            sap    = alle_sap.get(winkelnaam, {})
-            artikelen = bouw_artikellijst(winkelnaam, orders, dbo, sap, artikelen_db)
-            pik_bytes = schrijf_piklijst(winkelnaam, artikelen)
-            zf.writestr(f"{winkelnaam}_PIKLIJST.xlsx", pik_bytes)
-            n_gemaakt += 1
+
+    progressie = st.progress(0, text="Bezig met genereren…")
+    winkels_met_orders = [(w, o) for w, o in alle_orders.items() if any(v > 0 for v in o.values())]
+    totaal = len(winkels_met_orders)
+
+    for idx, (winkelnaam, orders) in enumerate(winkels_met_orders):
+        progressie.progress((idx) / max(totaal, 1), text=f"Verwerken: {winkelnaam}…")
+        dbo      = alle_dbo.get(winkelnaam, [])
+        sap      = alle_sap.get(winkelnaam, {})
+        artikelen = bouw_artikellijst(winkelnaam, orders, dbo, sap, artikelen_db)
+        # PDF genereren
+        pdf_bytes = schrijf_piklijst_pdf(winkelnaam, artikelen)
+        piklijsten[winkelnaam] = pdf_bytes
+        # Correcties opslaan in database (startpunt voor Stap 2)
+        sla_piklijst_correcties_op(winkelnaam, artikelen)
+        n_gemaakt += 1
+
+    progressie.progress(1.0, text="Klaar!")
+
     if n_gemaakt == 0:
         st.warning("Geen bestellingen gevonden. Winkels moeten eerst hun bestelling invullen.")
     else:
-        st.session_state["piklijsten_zip"] = zip_buf.getvalue()
-        st.session_state["piklijsten_n"]   = n_gemaakt
-        st.success(f"✅ {n_gemaakt} piklijst(en) gegenereerd. Download hieronder.")
-if "piklijsten_zip" in st.session_state:
-    st.download_button(
-        label=f"⬇️ Download piklijsten ZIP ({st.session_state['piklijsten_n']} bestanden)",
-        data=st.session_state["piklijsten_zip"],
-        file_name="Lion_Piklijsten.zip",
-        mime="application/zip",
-        use_container_width=True,
-    )
+        st.session_state["piklijsten_pdf"] = piklijsten
+        st.success(f"✅ {n_gemaakt} piklijst(en) gegenereerd. Download hieronder per winkel.")
+
+# Download-knoppen per winkel
+if "piklijsten_pdf" in st.session_state:
+    piklijsten = st.session_state["piklijsten_pdf"]
+    st.caption(f"**{len(piklijsten)} piklijst(en) beschikbaar:**")
+    cols = st.columns(min(len(piklijsten), 4))
+    for i, (winkelnaam, pdf_bytes) in enumerate(sorted(piklijsten.items())):
+        with cols[i % len(cols)]:
+            st.download_button(
+                label=f"⬇️ {winkelnaam}",
+                data=pdf_bytes,
+                file_name=f"{winkelnaam}_PIKLIJST.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+                key=f"dl_pik_{winkelnaam}",
+            )
+
 st.markdown("---")
 
-# ─── Paklijsten genereren ────────────────────────────────────────────────────
-st.subheader("📦 Stap 2 — Paklijsten genereren")
+# ─── Stap 2 — Correcties invoeren ────────────────────────────────────────────
+st.subheader("✏️ Stap 2 — Correcties invoeren")
 st.caption(
-    "Upload de **gecorrigeerde** piklijsten (na je NIET OP VOORRAAD correcties) "
-    "en genereer de paklijsten."
+    "Pas hier de aantallen aan na het pakken (bijv. NIET OP VOORRAAD artikelen). "
+    "Sla op per winkel. De gecorrigeerde aantallen worden gebruikt voor de paklijst in Stap 3."
 )
-gecorrigeerde = st.file_uploader(
-    "Upload gecorrigeerde piklijsten (.xlsx)",
-    type=["xlsx"],
-    accept_multiple_files=True,
-    key="piklijst_upload",
-)
-if gecorrigeerde:
-    if st.button("📦 Genereer paklijsten", type="primary", use_container_width=True):
-        zip_buf  = io.BytesIO()
-        n_gemaakt = 0
-        with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            for bestand in gecorrigeerde:
-                naam = bestand.name.replace("_PIKLIJST.xlsx", "").replace(".xlsx", "")
-                pak_bytes = schrijf_paklijst(naam, bestand.read())
-                zf.writestr(f"{naam}_PAKLIJST.xlsx", pak_bytes)
-                n_gemaakt += 1
-                st.success(f"✅ {naam}_PAKLIJST.xlsx gegenereerd")
-        st.session_state["paklijsten_zip"] = zip_buf.getvalue()
-        st.session_state["paklijsten_n"]   = n_gemaakt
-if "paklijsten_zip" in st.session_state:
-    st.download_button(
-        label=f"⬇️ Download paklijsten ZIP ({st.session_state.get('paklijsten_n', 0)} bestanden)",
-        data=st.session_state["paklijsten_zip"],
-        file_name="Lion_Paklijsten.zip",
-        mime="application/zip",
-        use_container_width=True,
+
+winkels_met_corr = laad_winkels_met_correcties()
+
+if not winkels_met_corr:
+    st.info("Nog geen piklijsten gegenereerd. Voer eerst Stap 1 uit.")
+else:
+    gekozen_winkel = st.selectbox(
+        "Kies winkel:",
+        options=winkels_met_corr,
+        key="correctie_winkel",
     )
+
+    if gekozen_winkel:
+        correcties = laad_piklijst_correcties(gekozen_winkel)
+
+        if not correcties:
+            st.info(f"Geen correctie-regels gevonden voor {gekozen_winkel}.")
+        else:
+            st.caption(f"**{len(correcties)} regels** — pas de 'Definitief' kolom aan waar nodig.")
+
+            # Toon als bewerkbare tabel met number_input per rij
+            # Gebruik session_state om wijzigingen bij te houden
+            key_prefix = f"corr_{gekozen_winkel}"
+
+            # Initialiseer session_state met huidige waarden
+            for c in correcties:
+                sk = f"{key_prefix}_{c['id']}"
+                if sk not in st.session_state:
+                    st.session_state[sk] = c["definitief_aantal"]
+
+            # Koptekst
+            hdr = st.columns([1, 3, 7, 3, 3])
+            hdr[0].markdown("**Pad**")
+            hdr[1].markdown("**Sectie**")
+            hdr[2].markdown("**Artikel**")
+            hdr[3].markdown("**Piklijst**")
+            hdr[4].markdown("**Definitief**")
+            st.markdown("<hr style='margin:4px 0'>", unsafe_allow_html=True)
+
+            for c in correcties:
+                sk = f"{key_prefix}_{c['id']}"
+                col = st.columns([1, 3, 7, 3, 3])
+                col[0].write(c.get("pad_code") or "—")
+                col[1].write(c.get("sectie") or "")
+                col[2].write(c.get("artikel") or "")
+                col[3].write(str(c.get("piklijst_aantal") or 0))
+                new_val = col[4].number_input(
+                    label="",
+                    min_value=0,
+                    value=st.session_state[sk],
+                    step=1,
+                    key=sk,
+                    label_visibility="collapsed",
+                )
+
+            # Opslaan
+            if st.button(f"💾 Sla correcties op voor {gekozen_winkel}", type="primary"):
+                gewijzigd = [
+                    {"id": c["id"], "definitief_aantal": st.session_state[f"{key_prefix}_{c['id']}"]}
+                    for c in correcties
+                ]
+                sla_definitief_op(gekozen_winkel, gewijzigd)
+                st.success(f"✅ Correcties opgeslagen voor {gekozen_winkel}.")
+
+st.markdown("---")
+
+# ─── Stap 3 — Paklijsten genereren (PDF) ─────────────────────────────────────
+st.subheader("📦 Stap 3 — Paklijsten genereren")
+st.caption(
+    "Genereert paklijsten als PDF op basis van de gecorrigeerde aantallen uit Stap 2. "
+    "Sla eerst de correcties op in Stap 2 voordat je hier genereert."
+)
+
+winkels_paklijst = laad_winkels_met_correcties()
+
+if not winkels_paklijst:
+    st.info("Nog geen piklijsten gegenereerd. Voer eerst Stap 1 uit.")
+else:
+    col_pak1, col_pak2 = st.columns([2, 1])
+    with col_pak1:
+        gekozen_pak = st.multiselect(
+            "Kies winkels voor paklijst:",
+            options=winkels_paklijst,
+            default=winkels_paklijst,
+            key="paklijst_winkels",
+        )
+    with col_pak2:
+        st.markdown("<br>", unsafe_allow_html=True)
+        genereer_pak = st.button(
+            "📦 Genereer paklijsten",
+            type="primary",
+            use_container_width=True,
+            disabled=not gekozen_pak,
+        )
+
+    if genereer_pak and gekozen_pak:
+        paklijsten = {}
+        for winkelnaam in gekozen_pak:
+            correcties = laad_piklijst_correcties(winkelnaam)
+            if not correcties:
+                st.warning(f"⚠️ Geen correcties gevonden voor {winkelnaam}, overgeslagen.")
+                continue
+            pdf_bytes = schrijf_paklijst_pdf(winkelnaam, correcties)
+            paklijsten[winkelnaam] = pdf_bytes
+            st.success(f"✅ Paklijst gegenereerd voor {winkelnaam}")
+        if paklijsten:
+            st.session_state["paklijsten_pdf"] = paklijsten
+
+    # Download-knoppen
+    if "paklijsten_pdf" in st.session_state:
+        paklijsten = st.session_state["paklijsten_pdf"]
+        st.caption(f"**{len(paklijsten)} paklijst(en) beschikbaar:**")
+        cols = st.columns(min(len(paklijsten), 4))
+        for i, (winkelnaam, pdf_bytes) in enumerate(sorted(paklijsten.items())):
+            with cols[i % len(cols)]:
+                st.download_button(
+                    label=f"⬇️ {winkelnaam}",
+                    data=pdf_bytes,
+                    file_name=f"{winkelnaam}_PAKLIJST.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                    key=f"dl_pak_{winkelnaam}",
+                )
+
 st.markdown("---")
 
 # ─── Reset bestellingen ───────────────────────────────────────────────────────
@@ -208,7 +331,7 @@ else:
             if st.button("Ja, wis bestellingen", type="primary", use_container_width=True):
                 reset_winkel_bestellingen(te_wissen)
                 st.cache_data.clear()
-                for k in ["piklijsten_zip", "piklijsten_n", "paklijsten_zip", "paklijsten_n", "_te_wissen"]:
+                for k in ["piklijsten_pdf", "paklijsten_pdf", "_te_wissen"]:
                     st.session_state.pop(k, None)
                 st.success(f"✅ Gewist: {', '.join(te_wissen)}")
                 st.rerun()
