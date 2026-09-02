@@ -180,8 +180,9 @@ winkels_met_corr = laad_winkels_met_correcties()
 if not winkels_met_corr:
     st.info("Nog geen piklijsten gegenereerd. Voer eerst Stap 1 uit.")
 else:
+    # Winkel selecteren — st.selectbox heeft ingebouwde zoekfunctie (typ om te filteren)
     gekozen_winkel = st.selectbox(
-        "Kies winkel:",
+        "Kies winkel (typ om te zoeken):",
         options=winkels_met_corr,
         key="correctie_winkel",
     )
@@ -192,44 +193,67 @@ else:
         if not correcties:
             st.info(f"Geen correctie-regels gevonden voor {gekozen_winkel}.")
         else:
-            st.caption(f"**{len(correcties)} regels** — pas de 'Definitief' kolom aan waar nodig.")
-
-            # Toon als bewerkbare tabel met number_input per rij
-            # Gebruik session_state om wijzigingen bij te houden
             key_prefix = f"corr_{gekozen_winkel}"
 
-            # Initialiseer session_state met huidige waarden
+            # Initialiseer session_state voor ALLE regels vóór het filteren,
+            # zodat gefilterde (niet-zichtbare) correcties niet verloren gaan bij opslaan.
             for c in correcties:
                 sk = f"{key_prefix}_{c['id']}"
                 if sk not in st.session_state:
                     st.session_state[sk] = c["definitief_aantal"]
 
-            # Koptekst
-            hdr = st.columns([1, 3, 7, 3, 3])
-            hdr[0].markdown("**Pad**")
-            hdr[1].markdown("**Sectie**")
-            hdr[2].markdown("**Artikel**")
-            hdr[3].markdown("**Piklijst**")
-            hdr[4].markdown("**Definitief**")
-            st.markdown("<hr style='margin:4px 0'>", unsafe_allow_html=True)
+            # ── Zoekfilter artikelen ──────────────────────────────────────────
+            zoekterm = st.text_input(
+                "🔍 Zoek op artikel, sectie of pad:",
+                key=f"zoek_{gekozen_winkel}",
+                placeholder="Typ om te filteren…",
+            )
 
-            for c in correcties:
-                sk = f"{key_prefix}_{c['id']}"
-                col = st.columns([1, 3, 7, 3, 3])
-                col[0].write(c.get("pad_code") or "—")
-                col[1].write(c.get("sectie") or "")
-                col[2].write(c.get("artikel") or "")
-                col[3].write(str(c.get("piklijst_aantal") or 0))
-                new_val = col[4].number_input(
-                    label="",
-                    min_value=0,
-                    value=st.session_state[sk],
-                    step=1,
-                    key=sk,
-                    label_visibility="collapsed",
+            if zoekterm.strip():
+                term = zoekterm.strip().lower()
+                gefilterd = [
+                    c for c in correcties
+                    if term in (c.get("artikel") or "").lower()
+                    or term in (c.get("sectie") or "").lower()
+                    or term in (c.get("pad_code") or "").lower()
+                ]
+                st.caption(
+                    f"**{len(gefilterd)} van {len(correcties)} regels** zichtbaar "
+                    f"— wijzigingen in verborgen regels blijven bewaard."
                 )
+            else:
+                gefilterd = correcties
+                st.caption(f"**{len(correcties)} regels** — pas de 'Definitief' kolom aan waar nodig.")
 
-            # Opslaan
+            if not gefilterd:
+                st.warning("Geen artikelen gevonden voor deze zoekterm.")
+            else:
+                # Koptekst
+                hdr = st.columns([1, 3, 7, 3, 3])
+                hdr[0].markdown("**Pad**")
+                hdr[1].markdown("**Sectie**")
+                hdr[2].markdown("**Artikel**")
+                hdr[3].markdown("**Piklijst**")
+                hdr[4].markdown("**Definitief**")
+                st.markdown("<hr style='margin:4px 0'>", unsafe_allow_html=True)
+
+                for c in gefilterd:
+                    sk = f"{key_prefix}_{c['id']}"
+                    col = st.columns([1, 3, 7, 3, 3])
+                    col[0].write(c.get("pad_code") or "—")
+                    col[1].write(c.get("sectie") or "")
+                    col[2].write(c.get("artikel") or "")
+                    col[3].write(str(c.get("piklijst_aantal") or 0))
+                    col[4].number_input(
+                        label="",
+                        min_value=0,
+                        value=st.session_state[sk],
+                        step=1,
+                        key=sk,
+                        label_visibility="collapsed",
+                    )
+
+            # Opslaan — altijd ALLE correcties (ook gefilterde/niet-zichtbare)
             if st.button(f"💾 Sla correcties op voor {gekozen_winkel}", type="primary"):
                 gewijzigd = [
                     {"id": c["id"], "definitief_aantal": st.session_state[f"{key_prefix}_{c['id']}"]}
