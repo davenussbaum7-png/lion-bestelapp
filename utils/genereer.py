@@ -556,12 +556,9 @@ def schrijf_paklijst_pdf(winkelnaam, correcties):
     # Usable width A4 staand: 210 - 2*15 = 180mm
     CW = [c * mm for c in [28, 112, 20]]  # EAN, Omschrijving, Aantal = 160mm + ruimte
 
-    # Filter en sorteer op EAN
+    # Filter en sorteer alfabetisch op artikelnaam
     items = [c for c in correcties if (c.get("definitief_aantal") or 0) > 0]
-    def pak_sort(a):
-        try:   return (0, int(a["ean"]), a["artikel"])
-        except: return (1, 0, a["artikel"])
-    items = sorted(items, key=pak_sort)
+    items = sorted(items, key=lambda a: (a.get("artikel") or "").lower())
 
     story = []
 
