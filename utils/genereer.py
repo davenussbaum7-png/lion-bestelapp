@@ -556,9 +556,16 @@ def schrijf_paklijst_pdf(winkelnaam, correcties):
     # Usable width A4 staand: 210 - 2*15 = 180mm
     CW = [c * mm for c in [28, 112, 20]]  # EAN, Omschrijving, Aantal = 160mm + ruimte
 
-    # Filter en sorteer alfabetisch op artikelnaam
+    C_SECT = colors.HexColor("#C0C0C0")
+
+    s_sect = ps("s", fontSize=9, fontName="Helvetica-Bold", leftIndent=4)
+
+    # Filter, sorteer op sectie (alfabetisch) dan artikel (alfabetisch)
     items = [c for c in correcties if (c.get("definitief_aantal") or 0) > 0]
-    items = sorted(items, key=lambda a: (a.get("artikel") or "").lower())
+    items = sorted(items, key=lambda a: (
+        (a.get("sectie") or "").lower(),
+        (a.get("artikel") or "").lower(),
+    ))
 
     story = []
 
@@ -576,13 +583,29 @@ def schrijf_paklijst_pdf(winkelnaam, correcties):
     story.append(Spacer(1, 2*mm))
 
     rows = [[Paragraph(h, s_hdr) for h in ["EAN", "Omschrijving", "Aantal"]]]
-    for i, art in enumerate(items):
-        zebra = i % 2 == 1
+    sect_rows   = []   # rij-indices van sectiekoppen
+    zebra_rows  = []   # rij-indices voor zebra-kleur
+    huidige_sectie = None
+    data_rij_nr = 0    # teller alleen voor data-regels (voor zebra)
+
+    for art in items:
+        sectie = art.get("sectie") or ""
+        if sectie != huidige_sectie:
+            huidige_sectie = sectie
+            ri = len(rows)
+            rows.append([Paragraph(f"  {sectie}", s_sect), "", ""])
+            sect_rows.append(ri)
+            data_rij_nr = 0   # zebra reset per sectie
+
+        ri = len(rows)
+        if data_rij_nr % 2 == 1:
+            zebra_rows.append(ri)
         rows.append([
             Paragraph(str(art.get("ean") or "—"), s_center),
             Paragraph(str(art.get("artikel") or ""), s_norm),
             Paragraph(str(art.get("definitief_aantal") or ""), s_center),
         ])
+        data_rij_nr += 1
 
     ts = [
         ("BACKGROUND", (0, 0), (-1, 0), C_KOP),
@@ -593,9 +616,16 @@ def schrijf_paklijst_pdf(winkelnaam, correcties):
         ("ROWHEIGHT",  (0, 0), (-1, -1), 15),
         ("GRID",       (0, 0), (-1, -1), 0.3, colors.HexColor("#CCCCCC")),
     ]
-    for i in range(1, len(rows)):
-        if i % 2 == 0:
-            ts.append(("BACKGROUND", (0, i), (-1, i), C_ZEBRA))
+    for ri in sect_rows:
+        ts += [
+            ("BACKGROUND", (0, ri), (-1, ri), C_SECT),
+            ("FONTNAME",   (0, ri), (-1, ri), "Helvetica-Bold"),
+            ("SPAN",       (0, ri), (-1, ri)),
+            ("BOX",        (0, ri), (-1, ri), 0.5, colors.HexColor("#888888")),
+            ("ROWHEIGHT",  (0, ri), (-1, ri), 14),
+        ]
+    for ri in zebra_rows:
+        ts.append(("BACKGROUND", (0, ri), (-1, ri), C_ZEBRA))
 
     tbl = Table(rows, colWidths=CW, repeatRows=1)
     tbl.setStyle(TableStyle(ts))
