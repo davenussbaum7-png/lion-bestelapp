@@ -341,8 +341,12 @@ def schrijf_paklijst(winkelnaam, piklijst_bytes):
     wb.save(buf)
     return buf.getvalue()
 # ─── Piklijst PDF ────────────────────────────────────────────────────────────
-def schrijf_piklijst_pdf(winkelnaam, artikelen):
-    """Genereert piklijst als PDF-bytes (A4 liggend)."""
+def schrijf_piklijst_pdf(winkelnaam, artikelen, pad_groepen=None):
+    """
+    Genereert piklijst als PDF-bytes (A4 liggend).
+    pad_groepen: optionele lijst van lijsten, bv. [["15","15A"], ["7","12"]]
+    — paden in dezelfde groep worden op één blad afgedrukt.
+    """
     from reportlab.lib.pagesizes import A4, landscape
     from reportlab.lib.units import mm
     from reportlab.lib import colors
@@ -403,16 +407,29 @@ def schrijf_piklijst_pdf(winkelnaam, artikelen):
         ]))
         return t
 
-    # Groepeer per pad_code
-    pad_groups: dict[str, list] = {}
+    # ── Pad-groepen: bouw mapping pad_code → pagina-sleutel ──────────────────
+    # pad_groepen bv. [["15","15A"], ["7","12"]] → paden in één groep
+    # delen een pagina; overige paden krijgen elk hun eigen pagina.
+    pad_naar_pagina: dict[str, str] = {}
+    if pad_groepen:
+        for groep in pad_groepen:
+            pads = [str(p).strip() for p in groep if str(p).strip()]
+            if len(pads) > 1:
+                sleutel = pads[0]   # eerste pad = pagina-sleutel voor de groep
+                for p in pads:
+                    pad_naar_pagina[p] = sleutel
+
+    # Groepeer artikelen per pagina (gegroepeerde paden → zelfde pagina)
+    pagina_groups: dict[str, list] = {}
     for art in artikelen:
-        key = art.get("pad_code") or ""
-        pad_groups.setdefault(key, []).append(art)
+        pad = str(art.get("pad_code") or "").strip()
+        sleutel = pad_naar_pagina.get(pad, pad)   # groep-sleutel of pad zelf
+        pagina_groups.setdefault(sleutel, []).append(art)
 
     story = []
     first = True
 
-    for pad_code, items in pad_groups.items():
+    for _pagina_sleutel, items in pagina_groups.items():
         if not first:
             story.append(PageBreak())
         first = False
@@ -429,7 +446,8 @@ def schrijf_piklijst_pdf(winkelnaam, artikelen):
         huidige_sectie = None
 
         for art in items:
-            sectie = art.get("sectie") or ""
+            art_pad  = art.get("pad_code") or ""
+            sectie   = art.get("sectie") or ""
             if sectie != huidige_sectie:
                 huidige_sectie = sectie
                 ri = len(rows)
@@ -455,7 +473,7 @@ def schrijf_piklijst_pdf(winkelnaam, artikelen):
 
             ri = len(rows)
             rows.append([
-                Paragraph(pad_code, s_center),
+                Paragraph(art_pad, s_center),    # pad per artikel (correct bij meerdere paden op één blad)
                 Paragraph(sectie, st),
                 Paragraph(art["artikel"] or "", st),
                 Paragraph(str(besteld_v), s_center) if besteld_v != "" else "",
