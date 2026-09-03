@@ -400,13 +400,19 @@ with tab3:
     if not gefilterd_beh:
         st.info("Geen artikelen gevonden met de huidige filter.")
     else:
+        # ── Selecteer alles ───────────────────────────────────────────────────
+        selecteer_alles = st.checkbox(
+            f"Selecteer alles ({n_getoond} artikelen)",
+            key="beh_selecteer_alles",
+        )
+
         # ── Bewerkbare tabel ──────────────────────────────────────────────────
         # Bewaar originele waarden per EAN voor vergelijking na bewerking
         origineel_beh = {a["ean"]: a for a in gefilterd_beh}
 
         df_beh = pd.DataFrame([
             {
-                "🗑": False,
+                "🗑": selecteer_alles,  # initieel True als selecteer_alles aan staat
                 "EAN": a["ean"],
                 "Artikel": a.get("artikel") or "",
                 "Sectie": a.get("sectie") or "",
@@ -414,6 +420,9 @@ with tab3:
             }
             for a in gefilterd_beh
         ])
+
+        # Unieke editor-key zodat de tabel herlaadt als selecteer_alles verandert
+        editor_key = f"beh_editor_{selecteer_alles}_{sectie_filter}_{zoek_beh}"
 
         bewerkt_df = st.data_editor(
             df_beh,
@@ -444,7 +453,7 @@ with tab3:
                 ),
             },
             num_rows="fixed",
-            key="beh_editor",
+            key=editor_key,
         )
 
         # ── Actieknoppen ──────────────────────────────────────────────────────
