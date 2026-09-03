@@ -117,7 +117,38 @@ st.caption(
     "De aantallen worden automatisch opgeslagen zodat je ze in Stap 2 kunt corrigeren."
 )
 
+# ── Pad-groepen instellen ────────────────────────────────────────────────────
+with st.expander("⚙️ Pad-groepen instellen (optioneel)", expanded=False):
+    st.caption(
+        "Typ per regel de padnummers die **samen op één blad** moeten worden afgedrukt, "
+        "gescheiden door komma's. Paden die je hier niet noemt, krijgen elk een eigen blad. "
+        "De padnummers moeten exact overeenkomen met de waarden in de piklijst (bijv. **15**, **15A**, **7**)."
+    )
+    # Toon bekende pads als hint (gevuld na eerste generatie)
+    bekende_pads = st.session_state.get("bekende_pads", [])
+    if bekende_pads:
+        st.info(f"Bekende pads uit vorige generatie: **{', '.join(bekende_pads)}**")
+    groepen_tekst = st.text_area(
+        "Pad-groepen (één groep per regel):",
+        value=st.session_state.get("pad_groepen_tekst", ""),
+        placeholder="Voorbeeld:\n15, 15A\n7, 12",
+        height=120,
+        key="pad_groepen_input",
+    )
+    st.session_state["pad_groepen_tekst"] = groepen_tekst
+
+def _parse_pad_groepen(tekst: str) -> list:
+    """Zet tekstveld om naar lijst van lijsten: '15, 15A\\n7, 12' → [['15','15A'],['7','12']]"""
+    groepen = []
+    for regel in (tekst or "").strip().splitlines():
+        pads = [p.strip() for p in regel.split(",") if p.strip()]
+        if len(pads) > 1:
+            groepen.append(pads)
+    return groepen
+
 if st.button("🖨️ Genereer alle piklijsten", type="primary", use_container_width=True):
+    pad_groepen = _parse_pad_groepen(st.session_state.get("pad_groepen_tekst", ""))
+
     artikelen_db = laad_artikelen()
     alle_orders  = laad_alle_bestellingen()
     alle_dbo     = laad_alle_dbo_bestellingen()
@@ -125,6 +156,7 @@ if st.button("🖨️ Genereer alle piklijsten", type="primary", use_container_w
 
     piklijsten = {}   # {winkelnaam: pdf_bytes}
     n_gemaakt = 0
+    alle_pads = set()
 
     progressie = st.progress(0, text="Bezig met genereren…")
     winkels_met_orders = [(w, o) for w, o in alle_orders.items() if any(v > 0 for v in o.values())]
@@ -135,8 +167,10 @@ if st.button("🖨️ Genereer alle piklijsten", type="primary", use_container_w
         dbo      = alle_dbo.get(winkelnaam, [])
         sap      = alle_sap.get(winkelnaam, {})
         artikelen = bouw_artikellijst(winkelnaam, orders, dbo, sap, artikelen_db)
-        # PDF genereren
-        pdf_bytes = schrijf_piklijst_pdf(winkelnaam, artikelen)
+        # Verzamel unieke pads (voor de hint in het pad-groepen veld)
+        alle_pads.update(a["pad_code"] for a in artikelen if a.get("pad_code"))
+        # PDF genereren met pad-groepen
+        pdf_bytes = schrijf_piklijst_pdf(winkelnaam, artikelen, pad_groepen=pad_groepen)
         piklijsten[winkelnaam] = pdf_bytes
         # Correcties opslaan in database (startpunt voor Stap 2)
         sla_piklijst_correcties_op(winkelnaam, artikelen)
@@ -144,10 +178,20 @@ if st.button("🖨️ Genereer alle piklijsten", type="primary", use_container_w
 
     progressie.progress(1.0, text="Klaar!")
 
+    # Bewaar bekende pads voor de hint (gesorteerd)
+    import re as _re
+    def _pad_sort(p):
+        m = _re.match(r'^(\d+)([A-Za-z]*)$', str(p))
+        return (int(m.group(1)), m.group(2).upper()) if m else (9999, str(p))
+    st.session_state["bekende_pads"] = sorted(alle_pads, key=_pad_sort)
+
     if n_gemaakt == 0:
         st.warning("Geen bestellingen gevonden. Winkels moeten eerst hun bestelling invullen.")
     else:
         st.session_state["piklijsten_pdf"] = piklijsten
+        if pad_groepen:
+            groep_labels = " | ".join(", ".join(g) for g in pad_groepen)
+            st.info(f"Pad-groepen toegepast: {groep_labels}")
         st.success(f"✅ {n_gemaakt} piklijst(en) gegenereerd. Download hieronder per winkel.")
 
 # Download-knoppen per winkel
