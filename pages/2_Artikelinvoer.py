@@ -64,6 +64,12 @@ def insert_batch(batch: list):
         json=batch,
     )
 
+def delete_artikel(ean: str):
+    return requests.delete(
+        f"{SUPABASE_URL}/rest/v1/articles?ean=eq.{quote(ean, safe='')}",
+        headers=HDR_WRITE,
+    )
+
 # ── Hulpfuncties ──────────────────────────────────────────────────────────────
 def pad_sort_key(x):
     """Sorteert padnummers numeriek: 1, 2, 2A, 3, 3A, 4, 4A, 12, 13A ipv 1, 12, 13A, 2, 2A..."""
@@ -100,7 +106,6 @@ def parse_excel_plak(tekst: str) -> list[dict]:
 
 # ── Pagina ────────────────────────────────────────────────────────────────────
 st.title("🛏  Artikelinvoer")
-
 col_info, col_btn = st.columns([6, 1])
 with col_btn:
     if st.button("↻  Herladen", use_container_width=True):
@@ -141,7 +146,11 @@ with col_info:
 st.divider()
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab1, tab2 = st.tabs(["➕  Artikelen invoeren", "✏️  Padnummer wijzigen"])
+tab1, tab2, tab3 = st.tabs([
+    "➕  Artikelen invoeren",
+    "✏️  Padnummer wijzigen",
+    "📝  Artikelen beheren",
+])
 
 # ════════════════════════════════════════════════════════════════════════════
 # TAB 1 — INVOEREN
@@ -341,3 +350,182 @@ with tab2:
                 st.rerun()
             else:
                 st.error(f"Fout {resp.status_code}: {resp.text[:300]}")
+
+# ════════════════════════════════════════════════════════════════════════════
+# TAB 3 — BEHEREN (bewerken / verwijderen)
+# ════════════════════════════════════════════════════════════════════════════
+with tab3:
+    st.markdown("### Artikelen bewerken of verwijderen")
+    st.caption(
+        "Kies een sectie, pas artikelnaam, sectie of pad direct aan in de tabel, "
+        "en vink aan wat je wilt verwijderen. Sla daarna op."
+    )
+
+    # ── Filters ──────────────────────────────────────────────────────────────
+    col_f1, col_f2 = st.columns([2, 3])
+    with col_f1:
+        sectie_filter = st.selectbox(
+            "Filter op sectie:",
+            ["— Alle secties —"] + sorted(secties_dict.keys()),
+            key="beh_sectie_filter",
+        )
+    with col_f2:
+        zoek_beh = st.text_input(
+            "🔍 Zoek op artikel of EAN:",
+            key="beh_zoek",
+            placeholder="Typ om te filteren…",
+        )
+
+    # ── Data filteren ─────────────────────────────────────────────────────────
+    gefilterd_beh = list(artikelen)  # kopie om origineel intact te houden
+    if sectie_filter != "— Alle secties —":
+        gefilterd_beh = [a for a in gefilterd_beh if a.get("sectie") == sectie_filter]
+    if zoek_beh.strip():
+        term = zoek_beh.strip().lower()
+        gefilterd_beh = [
+            a for a in gefilterd_beh
+            if term in (a.get("artikel") or "").lower()
+            or term in (a.get("ean") or "").lower()
+        ]
+
+    # Sorteer op sectie → artikelnaam
+    gefilterd_beh.sort(key=lambda a: (
+        (a.get("sectie") or "").lower(),
+        (a.get("artikel") or "").lower(),
+    ))
+
+    n_getoond = len(gefilterd_beh)
+    st.caption(f"**{n_getoond} artikel(en)** weergegeven.")
+
+    if not gefilterd_beh:
+        st.info("Geen artikelen gevonden met de huidige filter.")
+    else:
+        # ── Bewerkbare tabel ──────────────────────────────────────────────────
+        # Bewaar originele waarden per EAN voor vergelijking na bewerking
+        origineel_beh = {a["ean"]: a for a in gefilterd_beh}
+
+        df_beh = pd.DataFrame([
+            {
+                "🗑": False,
+                "EAN": a["ean"],
+                "Artikel": a.get("artikel") or "",
+                "Sectie": a.get("sectie") or "",
+                "Pad": a.get("pad_code") or "",
+            }
+            for a in gefilterd_beh
+        ])
+
+        bewerkt_df = st.data_editor(
+            df_beh,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "🗑": st.column_config.CheckboxColumn(
+                    "🗑",
+                    help="Vink aan om te verwijderen",
+                    width="small",
+                ),
+                "EAN": st.column_config.TextColumn(
+                    "EAN",
+                    disabled=True,
+                    width="medium",
+                ),
+                "Artikel": st.column_config.TextColumn(
+                    "Artikel",
+                    width="large",
+                ),
+                "Sectie": st.column_config.TextColumn(
+                    "Sectie",
+                    width="medium",
+                ),
+                "Pad": st.column_config.TextColumn(
+                    "Pad",
+                    width="small",
+                ),
+            },
+            num_rows="fixed",
+            key="beh_editor",
+        )
+
+        # ── Actieknoppen ──────────────────────────────────────────────────────
+        te_verwijderen = bewerkt_df[bewerkt_df["🗑"] == True]["EAN"].tolist()
+
+        col_sla, col_del = st.columns(2)
+
+        with col_sla:
+            if st.button("💾 Sla wijzigingen op", type="primary", use_container_width=True):
+                gewijzigd = 0
+                fouten_w = 0
+                for _, rij in bewerkt_df.iterrows():
+                    ean = rij["EAN"]
+                    oud = origineel_beh.get(ean, {})
+                    nieuw_artikel = rij["Artikel"].strip()
+                    nieuw_sectie  = rij["Sectie"].strip()
+                    nieuw_pad     = rij["Pad"].strip()
+                    # Alleen patchen als er iets veranderd is
+                    if (
+                        nieuw_artikel != (oud.get("artikel") or "").strip()
+                        or nieuw_sectie  != (oud.get("sectie")   or "").strip()
+                        or nieuw_pad     != (oud.get("pad_code") or "").strip()
+                    ):
+                        resp = patch_artikelen(
+                            f"ean=eq.{quote(ean, safe='')}",
+                            {
+                                "artikel":  nieuw_artikel,
+                                "sectie":   nieuw_sectie,
+                                "pad_code": nieuw_pad,
+                                "volgorde": volgorde_uit_sectie(nieuw_sectie),
+                            },
+                        )
+                        if resp.status_code in (200, 204):
+                            gewijzigd += 1
+                        else:
+                            fouten_w += 1
+                            st.warning(f"Fout bij EAN {ean}: {resp.text[:150]}")
+
+                if fouten_w == 0 and gewijzigd > 0:
+                    st.success(f"✅ {gewijzigd} artikel(en) bijgewerkt.")
+                    st.cache_data.clear()
+                    st.rerun()
+                elif gewijzigd == 0 and fouten_w == 0:
+                    st.info("Geen wijzigingen gevonden.")
+                else:
+                    st.warning(f"{gewijzigd} bijgewerkt, {fouten_w} mislukt.")
+                    st.cache_data.clear()
+                    st.rerun()
+
+        with col_del:
+            verwijder_label = (
+                f"🗑️ Verwijder geselecteerde ({len(te_verwijderen)})"
+                if te_verwijderen
+                else "🗑️ Verwijder geselecteerde"
+            )
+            if st.button(
+                verwijder_label,
+                use_container_width=True,
+                disabled=not te_verwijderen,
+                key="beh_verwijder_btn",
+            ):
+                verwijderd = 0
+                fouten_d = 0
+                for ean in te_verwijderen:
+                    resp = delete_artikel(ean)
+                    if resp.status_code in (200, 204):
+                        verwijderd += 1
+                    else:
+                        fouten_d += 1
+                        st.warning(f"Fout bij verwijderen EAN {ean}: {resp.text[:150]}")
+
+                if verwijderd > 0:
+                    st.success(f"✅ {verwijderd} artikel(en) verwijderd.")
+                else:
+                    st.error("Verwijderen mislukt.")
+                st.cache_data.clear()
+                st.rerun()
+
+        # ── Tip ──────────────────────────────────────────────────────────────
+        if te_verwijderen:
+            st.warning(
+                f"⚠️ **{len(te_verwijderen)} artikel(en) geselecteerd voor verwijdering** — "
+                "klik 'Verwijder geselecteerde' om te bevestigen. Dit kan niet ongedaan worden gemaakt."
+            )
