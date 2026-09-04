@@ -351,6 +351,25 @@ def laad_history_detail(history_id: int) -> dict:
     return rows.data[0] if rows.data else {}
 
 
+def wis_order_history(winkelnaam: str = None, voor_datum: str = None):
+    """
+    Wis historiek-regels.
+    - winkelnaam: alleen voor deze winkel (None = alle winkels)
+    - voor_datum: alleen regels vóór deze datum (ISO-string, bijv. '2026-09-01')
+    Beide filters tegelijk zijn mogelijk.
+    """
+    db = get_client()
+    query = db.table("order_history").delete()
+    if winkelnaam:
+        query = query.eq("winkelnaam", winkelnaam)
+    if voor_datum:
+        query = query.lt("datum", voor_datum)
+    if not winkelnaam and not voor_datum:
+        # Veiligheidscheck: voorkom dat je per ongeluk alles wist zonder filter
+        query = query.neq("id", 0)
+    query.execute()
+
+
 # ─── Order-status (terugkoppeling aan winkels) ────────────────────────────────
 def update_order_status(winkelnaam: str, status: str):
     """
