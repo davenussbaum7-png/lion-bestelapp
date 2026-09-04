@@ -24,7 +24,7 @@ from utils.database import (
     sla_piklijst_correcties_op, laad_piklijst_correcties,
     sla_definitief_op, laad_winkels_met_correcties,
     sla_order_history_op, update_order_status, laad_order_history,
-    laad_order_statussen, laad_winkels,
+    laad_order_statussen, laad_winkels, wis_order_history,
 )
 from utils.genereer import (
     bouw_artikellijst, schrijf_piklijst_pdf, schrijf_paklijst_pdf,
@@ -491,23 +491,37 @@ st.caption(
     "De data blijft bewaard na een reset, zodat je altijd kunt terugkijken."
 )
 
-# Filter op winkel
+import pandas as pd
+import datetime as _dt
+
 alle_winkels = [w["name"] for w in laad_winkels()]
-hist_filter = st.selectbox(
-    "Filter op winkel (optioneel):",
-    options=["Alle winkels"] + alle_winkels,
-    key="hist_winkel_filter",
-)
+
+# ── Filters ───────────────────────────────────────────────────────────────────
+fc1, fc2 = st.columns(2)
+with fc1:
+    hist_filter = st.selectbox(
+        "Filter op winkel:",
+        options=["Alle winkels"] + alle_winkels,
+        key="hist_winkel_filter",
+    )
+with fc2:
+    hist_jaar = st.selectbox(
+        "Filter op jaar:",
+        options=["Alle jaren"] + list(range(_dt.date.today().year, 2024, -1)),
+        key="hist_jaar_filter",
+    )
 
 winkel_filter = None if hist_filter == "Alle winkels" else hist_filter
-history = laad_order_history(winkelnaam=winkel_filter, limit=200)
+history = laad_order_history(winkelnaam=winkel_filter, limit=500)
+
+# Jaar-filter client-side (sneller dan extra DB-call)
+if hist_jaar != "Alle jaren":
+    history = [h for h in history if h.get("jaar") == int(hist_jaar)]
 
 if not history:
-    st.info("Nog geen orderhistorie beschikbaar. Genereer piklijsten in Stap 1 om te beginnen.")
+    st.info("Geen historiek gevonden voor deze filters.")
 else:
-    import pandas as pd
     df = pd.DataFrame(history)
-    # Datum leesbaar maken
     df["datum"] = pd.to_datetime(df["datum"]).dt.strftime("%d-%m-%Y %H:%M")
     df = df.rename(columns={
         "winkelnaam":    "Winkel",
@@ -520,3 +534,65 @@ else:
     df = df[["Winkel", "Datum", "Week", "Jaar", "Stuks", "Regels"]]
     st.dataframe(df, use_container_width=True, hide_index=True)
     st.caption(f"{len(history)} piklijst-generaties weergegeven.")
+
+# ── Historiek wissen ──────────────────────────────────────────────────────────
+with st.expander("🗑️ Historiek wissen", expanded=False):
+    st.caption("Verwijder historiek-regels per winkel en/of vóór een bepaalde datum. Beide filters tegelijk zijn mogelijk.")
+
+    wc1, wc2 = st.columns(2)
+    with wc1:
+        wis_winkel = st.selectbox(
+            "Winkel (leeg = alle winkels):",
+            options=["Alle winkels"] + alle_winkels,
+            key="wis_hist_winkel",
+        )
+    with wc2:
+        wis_voor = st.date_input(
+            "Wis alles vóór datum (leeg = geen datumfilter):",
+            value=None,
+            key="wis_hist_datum",
+        )
+
+    wis_winkel_val = None if wis_winkel == "Alle winkels" else wis_winkel
+    wis_datum_val  = wis_voor.isoformat() if wis_voor else None
+
+    # Omschrijving wat er gewist wordt
+    omschr_delen = []
+    if wis_winkel_val:
+        omschr_delen.append(f"winkel **{wis_winkel_val}**")
+    else:
+        omschr_delen.append("**alle winkels**")
+    if wis_datum_val:
+        omschr_delen.append(f"vóór **{wis_voor.strftime('%d-%m-%Y')}**")
+    omschr = " · ".join(omschr_delen)
+
+    st.warning(f"Dit verwijdert historiek voor {omschr}. Dit kan niet ongedaan worden gemaakt.")
+
+    @st.dialog("⚠️ Historiek wissen")
+    def bevestig_wis_history():
+        params = st.session_state.get("_wis_hist_params", {})
+        st.warning(
+            f"Je staat op het punt historiek te wissen voor "
+            f"{params.get('omschr', '?')}. Definitief verwijderd."
+        )
+        col_ja, col_nee = st.columns(2)
+        with col_ja:
+            if st.button("Ja, verwijder", type="primary", use_container_width=True):
+                wis_order_history(
+                    winkelnaam=params.get("winkel"),
+                    voor_datum=params.get("datum"),
+                )
+                st.session_state.pop("_wis_hist_params", None)
+                st.success("✅ Historiek gewist.")
+                st.rerun()
+        with col_nee:
+            if st.button("Annuleren", use_container_width=True):
+                st.rerun()
+
+    if st.button("🗑️ Wis geselecteerde historiek", use_container_width=True):
+        st.session_state["_wis_hist_params"] = {
+            "winkel": wis_winkel_val,
+            "datum":  wis_datum_val,
+            "omschr": omschr,
+        }
+        bevestig_wis_history()
