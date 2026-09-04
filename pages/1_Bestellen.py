@@ -77,7 +77,7 @@ if f"_geladen_{winkelnaam}" not in st.session_state:
         dbo_bestaand_init.setdefault(r["sectie"], []).append(r)
     for sectie_dbo in dbo_secties_init:
         bestaande = dbo_bestaand_init.get(sectie_dbo, [])
-        n_rijen = max(5, len(bestaande) + 2)
+        n_rijen = max(10, len(bestaande) + 2)
         for i in range(n_rijen):
             b = bestaande[i] if i < len(bestaande) else {}
             if f"dbo_art_{sectie_dbo}_{i}" not in st.session_state:
@@ -231,7 +231,7 @@ st.caption("Artikelen die niet in de lijst staan. Typ de naam en het aantal.")
 for sectie_dbo in dbo_secties:
     with st.expander(f"📝 {sectie_dbo}", expanded=False):
         bestaande_regels = dbo_bestaand.get(sectie_dbo, [])
-        n_rijen = max(5, len(bestaande_regels) + 2)
+        n_rijen = max(10, len(bestaande_regels) + 2)
         for i in range(n_rijen):
             c1, c2 = st.columns([4, 1])
             with c1:
@@ -269,7 +269,7 @@ if opslaan or opslaan_footer:
     nieuwe_dbo = []
     for sectie_dbo in dbo_secties:
         bestaande_regels = dbo_bestaand.get(sectie_dbo, [])
-        n_rijen = max(5, len(bestaande_regels) + 2)
+        n_rijen = max(10, len(bestaande_regels) + 2)
         for i in range(n_rijen):
             art_val = st.session_state.get(f"dbo_art_{sectie_dbo}_{i}", "")
             qty_val = st.session_state.get(f"dbo_qty_{sectie_dbo}_{i}", 0)
