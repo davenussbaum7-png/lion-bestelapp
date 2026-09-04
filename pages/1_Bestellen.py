@@ -71,7 +71,7 @@ if f"_geladen_{winkelnaam}" not in st.session_state:
     for art in artikelen_db:
         ean = art["ean"]
         st.session_state[f"art_{ean}"] = opgeslagen.get(ean, 0) or 0
-    dbo_secties_init = ["01 1 PERS.DBO", "02 2 PERS.DBO", "03 3 Pers.DBO", "04 260 BR.DBO"]
+    dbo_secties_init = ["01 1 PERS.DBO", "02 2 PERS.DBO", "03 3 Pers.DBO", "04 260 BR.DBO", "05 Diversen"]
     dbo_bestaand_init = {}
     for r in dbo_opgeslagen:
         dbo_bestaand_init.setdefault(r["sectie"], []).append(r)
@@ -220,7 +220,7 @@ for sectie, artikelen_sectie in secties.items():
 st.markdown("---")
 
 # ─── DBO-secties ──────────────────────────────────────────────────────────────
-dbo_secties = ["01 1 PERS.DBO", "02 2 PERS.DBO", "03 3 Pers.DBO", "04 260 BR.DBO"]
+dbo_secties = ["01 1 PERS.DBO", "02 2 PERS.DBO", "03 3 Pers.DBO", "04 260 BR.DBO", "05 Diversen"]
 dbo_bestaand = {}
 for r in dbo_opgeslagen:
     dbo_bestaand.setdefault(r["sectie"], []).append(r)
