@@ -106,6 +106,15 @@ with col_knoppen:
         key="opslaan_header",
     )
 
+# ─── Feedback van vorige opslag tonen (bovenaan, altijd zichtbaar) ───────────
+if "_save_result" in st.session_state:
+    _res = st.session_state.pop("_save_result")
+    if _res["ok"]:
+        st.success(_res["msg"])
+    else:
+        st.error(_res["msg"])
+        st.info("Ververs de pagina en probeer opnieuw. Als het probleem blijft, neem contact op met Wouter.")
+
 # ─── Statusbalk ───────────────────────────────────────────────────────────────
 _status_info = laad_order_status_info(winkelnaam)
 _status      = _status_info.get("status", "geen_bestelling")
@@ -283,8 +292,13 @@ if opslaan or opslaan_footer:
         sla_bestelling_op(winkelnaam, nieuwe_orders)
         sla_dbo_op(winkelnaam, nieuwe_dbo)
         ingevuld = sum(1 for v in nieuwe_orders.values() if v > 0) + len(nieuwe_dbo)
-        st.success(f"✅ Bestelling opgeslagen! {ingevuld} regels ingevuld.")
-        st.toast("✅ Opgeslagen!", icon="💾")
+        st.session_state["_save_result"] = {
+            "ok": True,
+            "msg": f"✅ Bestelling opgeslagen! {ingevuld} regels ingevuld.",
+        }
     except Exception as fout:
-        st.error(f"❌ Fout bij opslaan: {fout}")
-        st.info("Ververs de pagina en probeer opnieuw. Als het probleem blijft, neem contact op met Wouter.")
+        st.session_state["_save_result"] = {
+            "ok": False,
+            "msg": f"❌ Fout bij opslaan: {fout}",
+        }
+    st.rerun()
