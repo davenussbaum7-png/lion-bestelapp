@@ -1,6 +1,6 @@
 """
 Lion Beddenshop — Beheerpagina (Wouter)
-SAP uploaden, piklijsten genereren (PDF), correcties invoeren, paklijsten genereren (PDF), reset.
+SAP uploaden, piklijsten genereren (PDF), correcties invoeren, paklijsten genereren (PDF), reset, historiek.
 """
 import io
 import streamlit as st
@@ -9,6 +9,7 @@ st.set_page_config(
     page_icon="🔧",
     layout="wide",
 )
+
 # ─── Toegangscontrole ─────────────────────────────────────────────────────────
 if st.session_state.get("rol") != "beheer":
     st.warning("Toegang geweigerd. Log in als beheerder.")
@@ -22,10 +23,12 @@ from utils.database import (
     reset_alle_bestellingen, reset_winkel_bestellingen, update_pad_codes,
     sla_piklijst_correcties_op, laad_piklijst_correcties,
     sla_definitief_op, laad_winkels_met_correcties,
+    sla_order_history_op, update_order_status, laad_order_history,
+    laad_order_statussen, laad_winkels,
 )
 from utils.genereer import (
     bouw_artikellijst, schrijf_piklijst_pdf, schrijf_paklijst_pdf,
-    lees_sap_xlsx, lees_padcodes_xlsx,
+    lees_sap_xlsx, lees_padcodes_xlsx, maak_zip,
 )
 
 # ─── Header ───────────────────────────────────────────────────────────────────
@@ -43,11 +46,45 @@ st.markdown("---")
 # ─── Overzicht bestellingen ───────────────────────────────────────────────────
 st.subheader("📊 Status bestellingen")
 status = bestelling_status()
+statussen = laad_order_statussen()
+
+STATUS_LABELS = {
+    "geen_bestelling": ("⚪", "Geen bestelling"),
+    "besteld":         ("🟡", "Besteld"),
+    "piklijst_klaar":  ("🟢", "Piklijst klaar"),
+    "pakket_onderweg": ("🚚", "Pakket onderweg"),
+}
+
 cols = st.columns(min(len(status), 5))
 for i, s in enumerate(status):
     with cols[i % len(cols)]:
-        kleur = "🟢" if s["regels"] > 0 else "⚪"
-        st.metric(label=f"{kleur} {s['winkel']}", value=f"{s['regels']} regels")
+        winkel_status = statussen.get(s["winkel"], {}).get("status", "geen_bestelling")
+        icoon, label = STATUS_LABELS.get(winkel_status, ("⚪", winkel_status))
+        stuks_str = f"{s['stuks']} st" if s["stuks"] > 0 else "—"
+        regels_str = f"{s['regels']} regels"
+        st.metric(
+            label=f"{icoon} {s['winkel']}",
+            value=stuks_str,
+            delta=regels_str,
+            delta_color="off",
+            help=f"Status: {label}",
+        )
+
+# Pakket-onderweg knoppen per winkel die de status 'piklijst_klaar' hebben
+winkels_pikklaar = [
+    s["winkel"] for s in status
+    if statussen.get(s["winkel"], {}).get("status") == "piklijst_klaar"
+]
+if winkels_pikklaar:
+    st.caption("Markeer als 'Pakket onderweg' voor:")
+    pak_cols = st.columns(min(len(winkels_pikklaar), 5))
+    for i, winkelnaam in enumerate(winkels_pikklaar):
+        with pak_cols[i % len(pak_cols)]:
+            if st.button(f"🚚 {winkelnaam}", key=f"onderweg_{winkelnaam}", use_container_width=True):
+                update_order_status(winkelnaam, "pakket_onderweg")
+                st.success(f"✅ {winkelnaam} — pakket onderweg!")
+                st.rerun()
+
 st.markdown("---")
 
 # ─── SAP uploaden ─────────────────────────────────────────────────────────────
@@ -110,21 +147,20 @@ if padcode_bestand:
             st.info("De artikelcache is geleegd — nieuwe piklijsten gebruiken meteen de nieuwe padcodes.")
 st.markdown("---")
 
-# ─── Stap 1 — Piklijsten genereren (PDF) ────────────────────────────────────
+# ─── Stap 1 — Piklijsten genereren (PDF) ─────────────────────────────────────
 st.subheader("📋 Stap 1 — Piklijsten genereren")
 st.caption(
     "Genereert piklijsten als PDF voor alle winkels met ingevulde bestellingen. "
     "De aantallen worden automatisch opgeslagen zodat je ze in Stap 2 kunt corrigeren."
 )
 
-# ── Pad-groepen instellen ────────────────────────────────────────────────────
+# ── Pad-groepen instellen ─────────────────────────────────────────────────────
 with st.expander("⚙️ Pad-groepen instellen (optioneel)", expanded=False):
     st.caption(
         "Typ per regel de padnummers die **samen op één blad** moeten worden afgedrukt, "
         "gescheiden door komma's. Paden die je hier niet noemt, krijgen elk een eigen blad. "
         "De padnummers moeten exact overeenkomen met de waarden in de piklijst (bijv. **15**, **15A**, **7**)."
     )
-    # Toon bekende pads als hint (gevuld na eerste generatie)
     bekende_pads = st.session_state.get("bekende_pads", [])
     if bekende_pads:
         st.info(f"Bekende pads uit vorige generatie: **{', '.join(bekende_pads)}**")
@@ -137,6 +173,7 @@ with st.expander("⚙️ Pad-groepen instellen (optioneel)", expanded=False):
     )
     st.session_state["pad_groepen_tekst"] = groepen_tekst
 
+
 def _parse_pad_groepen(tekst: str) -> list:
     """Zet tekstveld om naar lijst van lijsten: '15, 15A\\n7, 12' → [['15','15A'],['7','12']]"""
     groepen = []
@@ -145,6 +182,7 @@ def _parse_pad_groepen(tekst: str) -> list:
         if len(pads) > 1:
             groepen.append(pads)
     return groepen
+
 
 if st.button("🖨️ Genereer alle piklijsten", type="primary", use_container_width=True):
     pad_groepen = _parse_pad_groepen(st.session_state.get("pad_groepen_tekst", ""))
@@ -167,13 +205,23 @@ if st.button("🖨️ Genereer alle piklijsten", type="primary", use_container_w
         dbo      = alle_dbo.get(winkelnaam, [])
         sap      = alle_sap.get(winkelnaam, {})
         artikelen = bouw_artikellijst(winkelnaam, orders, dbo, sap, artikelen_db)
+
         # Verzamel unieke pads (voor de hint in het pad-groepen veld)
         alle_pads.update(a["pad_code"] for a in artikelen if a.get("pad_code"))
+
         # PDF genereren met pad-groepen
         pdf_bytes = schrijf_piklijst_pdf(winkelnaam, artikelen, pad_groepen=pad_groepen)
         piklijsten[winkelnaam] = pdf_bytes
+
         # Correcties opslaan in database (startpunt voor Stap 2)
         sla_piklijst_correcties_op(winkelnaam, artikelen)
+
+        # ✨ Orderhistorie opslaan (snapshot vóór reset)
+        sla_order_history_op(winkelnaam, artikelen)
+
+        # ✨ Status bijwerken naar 'piklijst_klaar'
+        update_order_status(winkelnaam, "piklijst_klaar")
+
         n_gemaakt += 1
 
     progressie.progress(1.0, text="Klaar!")
@@ -192,9 +240,9 @@ if st.button("🖨️ Genereer alle piklijsten", type="primary", use_container_w
         if pad_groepen:
             groep_labels = " | ".join(", ".join(g) for g in pad_groepen)
             st.info(f"Pad-groepen toegepast: {groep_labels}")
-        st.success(f"✅ {n_gemaakt} piklijst(en) gegenereerd. Download hieronder per winkel.")
+        st.success(f"✅ {n_gemaakt} piklijst(en) gegenereerd. Download hieronder per winkel of allemaal tegelijk.")
 
-# Download-knoppen per winkel
+# Download-knoppen per winkel + zip
 if "piklijsten_pdf" in st.session_state:
     piklijsten = st.session_state["piklijsten_pdf"]
     st.caption(f"**{len(piklijsten)} piklijst(en) beschikbaar:**")
@@ -209,6 +257,17 @@ if "piklijsten_pdf" in st.session_state:
                 use_container_width=True,
                 key=f"dl_pik_{winkelnaam}",
             )
+    # ✨ Zip-download alle piklijsten
+    if len(piklijsten) > 1:
+        zip_bytes = maak_zip(piklijsten, "_PIKLIJST")
+        st.download_button(
+            label=f"📦 Download ALLE piklijsten als zip ({len(piklijsten)} bestanden)",
+            data=zip_bytes,
+            file_name="alle_piklijsten.zip",
+            mime="application/zip",
+            use_container_width=True,
+            key="dl_pik_zip",
+        )
 
 st.markdown("---")
 
@@ -224,7 +283,6 @@ winkels_met_corr = laad_winkels_met_correcties()
 if not winkels_met_corr:
     st.info("Nog geen piklijsten gegenereerd. Voer eerst Stap 1 uit.")
 else:
-    # Winkel selecteren — st.selectbox heeft ingebouwde zoekfunctie (typ om te filteren)
     gekozen_winkel = st.selectbox(
         "Kies winkel (typ om te zoeken):",
         options=winkels_met_corr,
@@ -239,14 +297,12 @@ else:
         else:
             key_prefix = f"corr_{gekozen_winkel}"
 
-            # Initialiseer session_state voor ALLE regels vóór het filteren,
-            # zodat gefilterde (niet-zichtbare) correcties niet verloren gaan bij opslaan.
+            # Initialiseer session_state voor ALLE regels vóór het filteren
             for c in correcties:
                 sk = f"{key_prefix}_{c['id']}"
                 if sk not in st.session_state:
                     st.session_state[sk] = c["definitief_aantal"]
 
-            # ── Zoekfilter artikelen ──────────────────────────────────────────
             zoekterm = st.text_input(
                 "🔍 Zoek op artikel, sectie of pad:",
                 key=f"zoek_{gekozen_winkel}",
@@ -272,7 +328,6 @@ else:
             if not gefilterd:
                 st.warning("Geen artikelen gevonden voor deze zoekterm.")
             else:
-                # Koptekst
                 hdr = st.columns([1, 3, 7, 3, 3])
                 hdr[0].markdown("**Pad**")
                 hdr[1].markdown("**Sectie**")
@@ -297,7 +352,6 @@ else:
                         label_visibility="collapsed",
                     )
 
-            # Opslaan — altijd ALLE correcties (ook gefilterde/niet-zichtbare)
             if st.button(f"💾 Sla correcties op voor {gekozen_winkel}", type="primary"):
                 gewijzigd = [
                     {"id": c["id"], "definitief_aantal": st.session_state[f"{key_prefix}_{c['id']}"]}
@@ -350,7 +404,7 @@ else:
         if paklijsten:
             st.session_state["paklijsten_pdf"] = paklijsten
 
-    # Download-knoppen
+    # Download-knoppen + zip
     if "paklijsten_pdf" in st.session_state:
         paklijsten = st.session_state["paklijsten_pdf"]
         st.caption(f"**{len(paklijsten)} paklijst(en) beschikbaar:**")
@@ -365,6 +419,17 @@ else:
                     use_container_width=True,
                     key=f"dl_pak_{winkelnaam}",
                 )
+        # ✨ Zip-download alle paklijsten
+        if len(paklijsten) > 1:
+            zip_bytes = maak_zip(paklijsten, "_PAKLIJST")
+            st.download_button(
+                label=f"📦 Download ALLE paklijsten als zip ({len(paklijsten)} bestanden)",
+                data=zip_bytes,
+                file_name="alle_paklijsten.zip",
+                mime="application/zip",
+                use_container_width=True,
+                key="dl_pak_zip",
+            )
 
 st.markdown("---")
 
@@ -416,3 +481,42 @@ else:
             bevestig_reset()
     else:
         st.caption("Selecteer minimaal één winkel.")
+
+st.markdown("---")
+
+# ─── Orderhistoriek ───────────────────────────────────────────────────────────
+st.subheader("📜 Orderhistoriek")
+st.caption(
+    "Overzicht van alle gegenereerde piklijsten. "
+    "De data blijft bewaard na een reset, zodat je altijd kunt terugkijken."
+)
+
+# Filter op winkel
+alle_winkels = [w["name"] for w in laad_winkels()]
+hist_filter = st.selectbox(
+    "Filter op winkel (optioneel):",
+    options=["Alle winkels"] + alle_winkels,
+    key="hist_winkel_filter",
+)
+
+winkel_filter = None if hist_filter == "Alle winkels" else hist_filter
+history = laad_order_history(winkelnaam=winkel_filter, limit=200)
+
+if not history:
+    st.info("Nog geen orderhistorie beschikbaar. Genereer piklijsten in Stap 1 om te beginnen.")
+else:
+    import pandas as pd
+    df = pd.DataFrame(history)
+    # Datum leesbaar maken
+    df["datum"] = pd.to_datetime(df["datum"]).dt.strftime("%d-%m-%Y %H:%M")
+    df = df.rename(columns={
+        "winkelnaam":    "Winkel",
+        "datum":         "Datum",
+        "weeknummer":    "Week",
+        "jaar":          "Jaar",
+        "totaal_stuks":  "Stuks",
+        "totaal_regels": "Regels",
+    })
+    df = df[["Winkel", "Datum", "Week", "Jaar", "Stuks", "Regels"]]
+    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.caption(f"{len(history)} piklijst-generaties weergegeven.")
