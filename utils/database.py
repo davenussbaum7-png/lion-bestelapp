@@ -403,6 +403,18 @@ def laad_order_status(winkelnaam: str) -> str:
     return "geen_bestelling"
 
 
+def laad_order_status_info(winkelnaam: str) -> dict:
+    """Geeft {status, bijgewerkt} voor één winkel. Gebruikt door winkelpagina voor de statusbalk."""
+    db = get_client()
+    rows = _retry(lambda: db.table("order_status")
+                             .select("status, bijgewerkt")
+                             .eq("winkelnaam", winkelnaam)
+                             .execute())
+    if rows.data:
+        return rows.data[0]
+    return {"status": "geen_bestelling", "bijgewerkt": None}
+
+
 # ─── Reset ───────────────────────────────────────────────────────────────────
 def reset_alle_bestellingen():
     """Verwijder alle bestellingen van alle winkels."""
