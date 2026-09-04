@@ -4,11 +4,13 @@ Gebaseerd op verwerk.py logica, aangepast voor webapp-gebruik.
 """
 import io
 import re
+import datetime
 import zipfile
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.pagebreak import Break
+
 # ─── Opmaak ───────────────────────────────────────────────────────────────────
 KLEUR_KOPTEKST   = "1C1C1C"
 KLEUR_SECTIE_VUL = "C0C0C0"
@@ -33,6 +35,20 @@ RAND_NIET_VOORR = Border(
     left=Side(style="medium"), right=Side(style="medium"),
     top=Side(style="medium"), bottom=Side(style="medium"),
 )
+
+
+# ─── Hulpfunctie datum ────────────────────────────────────────────────────────
+def _datum_label(datum=None) -> str:
+    """Geeft 'Week 36 · 4 september 2026' als string."""
+    d = datum or datetime.date.today()
+    maanden = [
+        "", "januari", "februari", "maart", "april", "mei", "juni",
+        "juli", "augustus", "september", "oktober", "november", "december",
+    ]
+    week = d.isocalendar()[1]
+    return f"Week {week}  ·  {d.day} {maanden[d.month]} {d.year}"
+
+
 # ─── Verrijken en sorteren ────────────────────────────────────────────────────
 def bouw_artikellijst(winkelnaam, orders, dbo_orders, sap_data, artikelen_db):
     """
@@ -42,9 +58,7 @@ def bouw_artikellijst(winkelnaam, orders, dbo_orders, sap_data, artikelen_db):
     sap_data    : {ean: {stuks_verkocht, voorraad_centraal, artikel}}
     artikelen_db: [{ean, artikel, sectie, pad_code, volgorde}]
     """
-    # EAN → catalogus-info
     catalogus = {a["ean"]: a for a in artikelen_db if a.get("ean")}
-    # Sectie → pad_code mapping (voor DBO en SAP-items zonder EAN in catalogus)
     sectie_pad = {}
     for a in artikelen_db:
         s = a.get("sectie")
@@ -53,16 +67,11 @@ def bouw_artikellijst(winkelnaam, orders, dbo_orders, sap_data, artikelen_db):
             sectie_pad[s] = p
 
     def normalize_pad_code(raw):
-        """Normaliseer pad_code naar canonical vorm.
-        '01 1 PERS.DBO' → '1', '03 3 Pers.DBO' → '3', '3A' → '3A', 'MATRASSEN' → ''
-        """
         if not raw:
             return ""
         raw = str(raw).strip()
-        # Al correct: "1", "3A", "13A", "15a"
         if re.match(r'^\d+[A-Za-z]*$', raw):
             return raw
-        # Sectienaam met 1-2 cijfer prefix gevolgd door spatie: "01 1 PERS.DBO" → "1"
         m = re.match(r'^(\d{1,2})\s', raw)
         if m:
             return str(int(m.group(1)))
@@ -121,7 +130,6 @@ def bouw_artikellijst(winkelnaam, orders, dbo_orders, sap_data, artikelen_db):
         if qty <= 0:
             continue
         sectie_dbo = dbo.get("sectie", "DBO")
-        # Gebruik sectie_pad lookup, dan sectienaam zelf als fallback voor pad-afleiding
         raw_pad_dbo = sectie_pad.get(sectie_dbo) or sectie_dbo
         resultaat.append({
             "type":       "DBO",
@@ -129,12 +137,12 @@ def bouw_artikellijst(winkelnaam, orders, dbo_orders, sap_data, artikelen_db):
             "artikel":    dbo.get("artikel", ""),
             "sectie":     sectie_dbo,
             "pad_code":   normalize_pad_code(raw_pad_dbo),
-            "volgorde":   -1,  # DBO secties 01-04 bovenaan
+            "volgorde":   -1,
             "besteld":    qty,
             "sap":        0,
             "op_voorraad": True,
         })
-    # Sorteren: pad_code numerisch (1, 2, 2A, 3, 12 ipv 1, 12, 2, 3...)
+
     def pad_sort_key(code):
         if not code:
             return (9999, "")
@@ -145,7 +153,9 @@ def bouw_artikellijst(winkelnaam, orders, dbo_orders, sap_data, artikelen_db):
 
     resultaat.sort(key=lambda a: (pad_sort_key(a["pad_code"]), a["volgorde"], a["artikel"]))
     return resultaat
-# ─── Piklijst schrijven ───────────────────────────────────────────────────────
+
+
+# ─── Piklijst schrijven (xlsx) ────────────────────────────────────────────────
 def schrijf_piklijst(winkelnaam, artikelen):
     """Geeft bytes van de piklijst xlsx terug."""
     wb = openpyxl.Workbook()
@@ -161,7 +171,6 @@ def schrijf_piklijst(winkelnaam, artikelen):
     ws.page_margins.top  = ws.page_margins.bottom = 0.5
     for i, breedte in enumerate([5, 28, 57, 8, 8, 8, 8, 14, 26], 1):
         ws.column_dimensions[get_column_letter(i)].width = breedte
-    # Titel
     ws.merge_cells("A1:I1")
     c = ws["A1"]
     c.value = f"PIKLIJST — {winkelnaam.upper()}"
@@ -169,7 +178,6 @@ def schrijf_piklijst(winkelnaam, artikelen):
     c.fill  = PatternFill("solid", fgColor=KLEUR_KOPTEKST)
     c.alignment = Alignment(horizontal="center", vertical="center")
     ws.row_dimensions[1].height = 28
-    # Legenda
     ws.merge_cells("A2:I2")
     c = ws["A2"]
     c.value = "VET + dikke rand = NIET OP VOORRAAD   |   Cursief = SAP aanvulling of DBO vrije invoer"
@@ -177,7 +185,6 @@ def schrijf_piklijst(winkelnaam, artikelen):
     c.fill  = PatternFill("solid", fgColor="F0F0F0")
     c.alignment = Alignment(horizontal="left", vertical="center", indent=1)
     ws.row_dimensions[2].height = 14
-    # Kopteksten
     headers = ["Pad", "Sectie", "Artikel", "Besteld", "SAP", "Totaal", "Gepakt □", "EAN", "Opmerking"]
     for ci, h in enumerate(headers, 1):
         cel = ws.cell(row=3, column=ci, value=h)
@@ -192,7 +199,6 @@ def schrijf_piklijst(winkelnaam, artikelen):
     for art in artikelen:
         sectie   = art.get("sectie") or ""
         pad_code = art.get("pad_code") or ""
-        # Nieuwe pagina bij wisseling van pad_code (alleen als pad_code ingevuld is)
         if pad_code and huidige_pad is not None and pad_code != huidige_pad:
             ws.row_breaks.append(Break(id=rij_nr - 1))
         huidige_pad = pad_code
@@ -241,7 +247,6 @@ def schrijf_piklijst(winkelnaam, artikelen):
             )
         ws.row_dimensions[rij_nr].height = 18
         rij_nr += 1
-    # Totaalregel
     totaal_stuks    = sum((a["besteld"] or 0) + (a["sap"] or 0) for a in artikelen)
     niet_voorraad_n = sum(1 for a in artikelen if not a["op_voorraad"] and a["sap"] > 0)
     ws.merge_cells(f"A{rij_nr}:I{rij_nr}")
@@ -255,7 +260,9 @@ def schrijf_piklijst(winkelnaam, artikelen):
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
-# ─── Paklijst schrijven ───────────────────────────────────────────────────────
+
+
+# ─── Paklijst schrijven (xlsx) ────────────────────────────────────────────────
 def schrijf_paklijst(winkelnaam, piklijst_bytes):
     """
     Leest gecorrigeerde piklijst (bytes) en genereert paklijst.
@@ -286,7 +293,6 @@ def schrijf_paklijst(winkelnaam, piklijst_bytes):
             "artikel": str(artikel).strip(),
             "totaal":  totaal_val,
         })
-    # Paklijst bouwen
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Paklijst"
@@ -313,11 +319,13 @@ def schrijf_paklijst(winkelnaam, piklijst_bytes):
         cel.alignment = Alignment(horizontal="center", vertical="center")
         cel.border    = RAND_DUN
     ws.row_dimensions[2].height = 18
+
     def pak_sort(a):
         try:
             return (0, int(a["ean"]), a["artikel"])
         except (ValueError, TypeError):
             return (1, 0, a["artikel"])
+
     gesorteerd = sorted(artikelen, key=pak_sort)
     rij_nr = 3
     zebra  = False
@@ -340,12 +348,14 @@ def schrijf_paklijst(winkelnaam, piklijst_bytes):
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
-# ─── Piklijst PDF ────────────────────────────────────────────────────────────
-def schrijf_piklijst_pdf(winkelnaam, artikelen, pad_groepen=None):
+
+
+# ─── Piklijst PDF ─────────────────────────────────────────────────────────────
+def schrijf_piklijst_pdf(winkelnaam, artikelen, pad_groepen=None, datum=None):
     """
     Genereert piklijst als PDF-bytes (A4 liggend).
     pad_groepen: optionele lijst van lijsten, bv. [["15","15A"], ["7","12"]]
-    — paden in dezelfde groep worden op één blad afgedrukt.
+    datum: datetime.date object; standaard vandaag.
     """
     from reportlab.lib.pagesizes import A4, landscape
     from reportlab.lib.units import mm
@@ -353,6 +363,8 @@ def schrijf_piklijst_pdf(winkelnaam, artikelen, pad_groepen=None):
     from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, PageBreak, Spacer
     from reportlab.lib.styles import ParagraphStyle
     from reportlab.lib.enums import TA_CENTER
+
+    datum_label = _datum_label(datum)
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -383,19 +395,22 @@ def schrijf_piklijst_pdf(winkelnaam, artikelen, pad_groepen=None):
     s_leg    = ps("l", fontSize=7, fontName="Helvetica-Oblique",
                   textColor=colors.HexColor("#555555"))
 
-    # Kolombreedtes: Pad Sectie Artikel Besteld SAP Totaal Gepakt EAN Opmerking
-    # Totaal = 277mm (A4 liggend - 2*10mm marge)
     CW = [c * mm for c in [8, 46, 98, 13, 13, 13, 13, 26, 47]]
     HDRS = ["Pad", "Sectie", "Artikel", "Besteld", "SAP", "Totaal", "Gepakt □", "EAN", "Opmerking"]
 
     def header_row():
         return [Paragraph(h, s_hdr) for h in HDRS]
 
-    # Titel-tabel bovenaan elke pagina (gebouwd als los Table per pad-groep)
     def titel_tabel():
         t = Table(
-            [[Paragraph(f"PIKLIJST — {winkelnaam.upper()}", s_titel)],
-             [Paragraph("VET + dikke rand = NIET OP VOORRAAD   |   Cursief = SAP aanvulling of DBO vrije invoer", s_leg)]],
+            [
+                [Paragraph(f"PIKLIJST — {winkelnaam.upper()}", s_titel)],
+                [Paragraph(
+                    f"VET + dikke rand = NIET OP VOORRAAD   |   Cursief = SAP aanvulling of DBO vrije invoer"
+                    f"   |   <b>{datum_label}</b>",
+                    s_leg,
+                )],
+            ],
             colWidths=[sum(CW)],
         )
         t.setStyle(TableStyle([
@@ -407,23 +422,20 @@ def schrijf_piklijst_pdf(winkelnaam, artikelen, pad_groepen=None):
         ]))
         return t
 
-    # ── Pad-groepen: bouw mapping pad_code → pagina-sleutel ──────────────────
-    # pad_groepen bv. [["15","15A"], ["7","12"]] → paden in één groep
-    # delen een pagina; overige paden krijgen elk hun eigen pagina.
+    # Pad-groepen mapping
     pad_naar_pagina: dict[str, str] = {}
     if pad_groepen:
         for groep in pad_groepen:
             pads = [str(p).strip() for p in groep if str(p).strip()]
             if len(pads) > 1:
-                sleutel = pads[0]   # eerste pad = pagina-sleutel voor de groep
+                sleutel = pads[0]
                 for p in pads:
                     pad_naar_pagina[p] = sleutel
 
-    # Groepeer artikelen per pagina (gegroepeerde paden → zelfde pagina)
     pagina_groups: dict[str, list] = {}
     for art in artikelen:
         pad = str(art.get("pad_code") or "").strip()
-        sleutel = pad_naar_pagina.get(pad, pad)   # groep-sleutel of pad zelf
+        sleutel = pad_naar_pagina.get(pad, pad)
         pagina_groups.setdefault(sleutel, []).append(art)
 
     story = []
@@ -438,7 +450,7 @@ def schrijf_piklijst_pdf(winkelnaam, artikelen, pad_groepen=None):
         story.append(Spacer(1, 2*mm))
 
         rows = [header_row()]
-        sect_rows: list[int] = []   # rij-indices van sectiekoppen
+        sect_rows: list[int] = []
         niet_vv_rows: list[int] = []
         dbo_sap_rows: list[int] = []
         zebra_rows: list[int] = []
@@ -473,7 +485,7 @@ def schrijf_piklijst_pdf(winkelnaam, artikelen, pad_groepen=None):
 
             ri = len(rows)
             rows.append([
-                Paragraph(art_pad, s_center),    # pad per artikel (correct bij meerdere paden op één blad)
+                Paragraph(art_pad, s_center),
                 Paragraph(sectie, st),
                 Paragraph(art["artikel"] or "", st),
                 Paragraph(str(besteld_v), s_center) if besteld_v != "" else "",
@@ -492,12 +504,10 @@ def schrijf_piklijst_pdf(winkelnaam, artikelen, pad_groepen=None):
             zebra = not zebra
 
         ts = [
-            # Header
             ("BACKGROUND", (0, 0), (-1, 0), C_KOP),
             ("FONTNAME",   (0, 0), (-1, 0), "Helvetica-Bold"),
             ("FONTSIZE",   (0, 0), (-1, 0), 9),
             ("ALIGN",      (0, 0), (-1, 0), "CENTER"),
-            # Algemeen
             ("VALIGN",     (0, 0), (-1, -1), "MIDDLE"),
             ("FONTSIZE",   (0, 1), (-1, -1), 8),
             ("ROWHEIGHT",  (0, 0), (-1, -1), 14),
@@ -523,7 +533,6 @@ def schrijf_piklijst_pdf(winkelnaam, artikelen, pad_groepen=None):
         tbl.setStyle(TableStyle(ts))
         story.append(tbl)
 
-    # Totaalregel als laatste
     totaal_stuks = sum((a["besteld"] or 0) + (a["sap"] or 0) for a in artikelen)
     niet_vv_n    = sum(1 for a in artikelen if not a["op_voorraad"] and a["sap"] > 0)
     story.append(Spacer(1, 3*mm))
@@ -537,10 +546,11 @@ def schrijf_piklijst_pdf(winkelnaam, artikelen, pad_groepen=None):
 
 
 # ─── Paklijst PDF ─────────────────────────────────────────────────────────────
-def schrijf_paklijst_pdf(winkelnaam, correcties):
+def schrijf_paklijst_pdf(winkelnaam, correcties, datum=None):
     """
     Genereert paklijst als PDF-bytes (A4 staand).
     correcties: [{ean, artikel, definitief_aantal}]
+    datum: datetime.date object; standaard vandaag.
     """
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.units import mm
@@ -548,6 +558,8 @@ def schrijf_paklijst_pdf(winkelnaam, correcties):
     from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
     from reportlab.lib.styles import ParagraphStyle
     from reportlab.lib.enums import TA_CENTER
+
+    datum_label = _datum_label(datum)
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -558,6 +570,7 @@ def schrijf_paklijst_pdf(winkelnaam, correcties):
 
     C_KOP   = colors.HexColor("#1C1C1C")
     C_ZEBRA = colors.HexColor("#F5F5F5")
+    C_SECT  = colors.HexColor("#C0C0C0")
 
     def ps(name, **kw):
         d = dict(fontSize=9, leading=11, fontName="Helvetica", spaceAfter=0, spaceBefore=0)
@@ -570,15 +583,13 @@ def schrijf_paklijst_pdf(winkelnaam, correcties):
                   textColor=colors.white, alignment=TA_CENTER)
     s_titel  = ps("t", fontSize=14, fontName="Helvetica-Bold",
                   textColor=colors.white, alignment=TA_CENTER, leading=18)
+    s_sub    = ps("sub", fontSize=7, fontName="Helvetica-Oblique",
+                  textColor=colors.HexColor("#CCCCCC"), alignment=TA_CENTER)
+    s_sect   = ps("s", fontSize=9, fontName="Helvetica-Bold", leftIndent=4)
 
     # Usable width A4 staand: 210 - 2*15 = 180mm
-    CW = [c * mm for c in [28, 112, 20]]  # EAN, Omschrijving, Aantal = 160mm + ruimte
+    CW = [c * mm for c in [28, 112, 20]]
 
-    C_SECT = colors.HexColor("#C0C0C0")
-
-    s_sect = ps("s", fontSize=9, fontName="Helvetica-Bold", leftIndent=4)
-
-    # Filter, sorteer op sectie (alfabetisch) dan artikel (alfabetisch)
     items = [c for c in correcties if (c.get("definitief_aantal") or 0) > 0]
     items = sorted(items, key=lambda a: (
         (a.get("sectie") or "").lower(),
@@ -587,24 +598,28 @@ def schrijf_paklijst_pdf(winkelnaam, correcties):
 
     story = []
 
-    # Titel
+    # Titel (naam + datum op aparte rijen)
     tit = Table(
-        [[Paragraph(f"PAKLIJST — {winkelnaam.upper()}", s_titel)]],
+        [
+            [Paragraph(f"PAKLIJST — {winkelnaam.upper()}", s_titel)],
+            [Paragraph(datum_label, s_sub)],
+        ],
         colWidths=[sum(CW)],
     )
     tit.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, -1), C_KOP),
-        ("ROWHEIGHT",  (0, 0), (-1, -1), 22),
+        ("ROWHEIGHT",  (0, 0), (-1, 0), 22),
+        ("ROWHEIGHT",  (0, 1), (-1, 1), 12),
         ("VALIGN",     (0, 0), (-1, -1), "MIDDLE"),
     ]))
     story.append(tit)
     story.append(Spacer(1, 2*mm))
 
     rows = [[Paragraph(h, s_hdr) for h in ["EAN", "Omschrijving", "Aantal"]]]
-    sect_rows   = []   # rij-indices van sectiekoppen
-    zebra_rows  = []   # rij-indices voor zebra-kleur
+    sect_rows   = []
+    zebra_rows  = []
     huidige_sectie = None
-    data_rij_nr = 0    # teller alleen voor data-regels (voor zebra)
+    data_rij_nr = 0
 
     for art in items:
         sectie = art.get("sectie") or ""
@@ -613,7 +628,7 @@ def schrijf_paklijst_pdf(winkelnaam, correcties):
             ri = len(rows)
             rows.append([Paragraph(f"  {sectie}", s_sect), "", ""])
             sect_rows.append(ri)
-            data_rij_nr = 0   # zebra reset per sectie
+            data_rij_nr = 0
 
         ri = len(rows)
         if data_rij_nr % 2 == 1:
@@ -659,6 +674,21 @@ def schrijf_paklijst_pdf(winkelnaam, correcties):
     return buf.getvalue()
 
 
+# ─── Zip-bundle helpers ───────────────────────────────────────────────────────
+def maak_zip(bestanden: dict, suffix: str = "") -> bytes:
+    """
+    Bundel meerdere PDF's in één zip.
+    bestanden: {winkelnaam: pdf_bytes}
+    suffix: "_PIKLIJST" of "_PAKLIJST"
+    Geeft zip als bytes terug.
+    """
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for naam, pdf in sorted(bestanden.items()):
+            zf.writestr(f"{naam}{suffix}.pdf", pdf)
+    return buf.getvalue()
+
+
 # ─── SAP xlsx inlezen ────────────────────────────────────────────────────────
 def lees_sap_xlsx(bestand_bytes) -> tuple:
     """
@@ -676,11 +706,13 @@ def lees_sap_xlsx(bestand_bytes) -> tuple:
                 if h:
                     headers[str(h).strip().lower()] = ci
             break
+
     def kolom(opties):
         for n in opties:
             if n in headers:
                 return headers[n]
         return None
+
     ci_winkel   = kolom(["magazijnnaam"])
     ci_ean      = kolom(["artikelnummer", "artikel_nummer"])
     ci_artikel  = kolom(["dscription", "description", "omschrijving"])
@@ -734,7 +766,6 @@ def lees_padcodes_xlsx(bestand_bytes) -> dict:
     """
     Leest een Excel met minimaal kolommen EAN en Pad_code.
     Geeft {ean: pad_code} terug.
-    Herkent ook: 'Padcode', 'Pad code', 'pad', 'pad_nr'.
     """
     buf = io.BytesIO(bestand_bytes)
     wb  = openpyxl.load_workbook(buf, data_only=True)
