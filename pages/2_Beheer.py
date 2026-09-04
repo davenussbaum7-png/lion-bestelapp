@@ -3,6 +3,9 @@ Lion Beddenshop — Beheerpagina (Wouter)
 SAP uploaden, piklijsten genereren (PDF), correcties invoeren, paklijsten genereren (PDF), reset, historiek.
 """
 import io
+import re as _re
+import datetime as _dt
+import pandas as pd
 import streamlit as st
 st.set_page_config(
     page_title="Beheer — Lion Beddenshop",
@@ -43,10 +46,14 @@ with col2:
         st.switch_page("app.py")
 st.markdown("---")
 
+# ─── Data éénmalig laden (wordt hergebruikt in reset-sectie) ──────────────────
+status         = bestelling_status()          # ← één keer, reused below
+statussen      = laad_order_statussen()
+winkels_corr   = laad_winkels_met_correcties()  # ← één keer, reused below
+alle_winkels   = [w["name"] for w in laad_winkels()]
+
 # ─── Overzicht bestellingen ───────────────────────────────────────────────────
 st.subheader("📊 Status bestellingen")
-status = bestelling_status()
-statussen = laad_order_statussen()
 
 STATUS_LABELS = {
     "geen_bestelling": ("⚪", "Geen bestelling"),
@@ -227,7 +234,6 @@ if st.button("🖨️ Genereer alle piklijsten", type="primary", use_container_w
     progressie.progress(1.0, text="Klaar!")
 
     # Bewaar bekende pads voor de hint (gesorteerd)
-    import re as _re
     def _pad_sort(p):
         m = _re.match(r'^(\d+)([A-Za-z]*)$', str(p))
         return (int(m.group(1)), m.group(2).upper()) if m else (9999, str(p))
@@ -278,14 +284,12 @@ st.caption(
     "Sla op per winkel. De gecorrigeerde aantallen worden gebruikt voor de paklijst in Stap 3."
 )
 
-winkels_met_corr = laad_winkels_met_correcties()
-
-if not winkels_met_corr:
+if not winkels_corr:
     st.info("Nog geen piklijsten gegenereerd. Voer eerst Stap 1 uit.")
 else:
     gekozen_winkel = st.selectbox(
         "Kies winkel (typ om te zoeken):",
-        options=winkels_met_corr,
+        options=winkels_corr,
         key="correctie_winkel",
     )
 
@@ -369,20 +373,23 @@ st.caption(
     "Sla eerst de correcties op in Stap 2 voordat je hier genereert."
 )
 
-winkels_paklijst = laad_winkels_met_correcties()
-
-if not winkels_paklijst:
+if not winkels_corr:
     st.info("Nog geen piklijsten gegenereerd. Voer eerst Stap 1 uit.")
 else:
-    col_pak1, col_pak2 = st.columns([2, 1])
+    col_pak1, col_pak2, col_pak3 = st.columns([2, 1, 1])
     with col_pak1:
         gekozen_pak = st.multiselect(
             "Kies winkels voor paklijst:",
-            options=winkels_paklijst,
-            default=winkels_paklijst,
+            options=winkels_corr,
+            default=[],          # ← standaard leeg, bewuste keuze
             key="paklijst_winkels",
         )
     with col_pak2:
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("✅ Selecteer alles", use_container_width=True):
+            st.session_state["paklijst_winkels"] = winkels_corr
+            st.rerun()
+    with col_pak3:
         st.markdown("<br>", unsafe_allow_html=True)
         genereer_pak = st.button(
             "📦 Genereer paklijsten",
@@ -436,12 +443,14 @@ st.markdown("---")
 # ─── Reset bestellingen ───────────────────────────────────────────────────────
 st.subheader("🗑️ Bestellingen wissen")
 
-status_reset = bestelling_status()
-winkels_met_orders = [s["winkel"] for s in status_reset if s["regels"] > 0]
+# Hergebruik 'status' van bovenaan — geen tweede DB-call nodig
+winkels_met_orders = [s["winkel"] for s in status if s["regels"] > 0]
 
 if not winkels_met_orders:
     st.info("Geen openstaande bestellingen om te wissen.")
 else:
+    st.warning("⚠️ Zorg dat je alle piklijsten gedownload hebt voordat je wist!")
+
     geselecteerd = st.multiselect(
         "Kies welke winkels je wilt wissen:",
         options=winkels_met_orders,
@@ -490,11 +499,6 @@ st.caption(
     "Overzicht van alle gegenereerde piklijsten. "
     "De data blijft bewaard na een reset, zodat je altijd kunt terugkijken."
 )
-
-import pandas as pd
-import datetime as _dt
-
-alle_winkels = [w["name"] for w in laad_winkels()]
 
 # ── Filters ───────────────────────────────────────────────────────────────────
 fc1, fc2 = st.columns(2)

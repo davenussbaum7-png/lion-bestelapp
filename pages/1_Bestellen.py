@@ -31,7 +31,7 @@ winkelnaam = st.session_state.ingelogd_als
 
 from utils.database import (
     laad_artikelen, laad_bestelling, laad_dbo_bestelling,
-    sla_bestelling_op, sla_dbo_op, laad_order_status,
+    sla_bestelling_op, sla_dbo_op, laad_order_status_info,
 )
 # ─── Stijl ────────────────────────────────────────────────────────────────────
 st.markdown("""
@@ -107,14 +107,9 @@ with col_knoppen:
     )
 
 # ─── Statusbalk ───────────────────────────────────────────────────────────────
-_status = laad_order_status(winkelnaam)
-
-_STAPPEN = [
-    ("geen_bestelling", "besteld"),           # stap 1: bestelling invullen
-    ("besteld",),                              # stap 2: ontvangen
-    ("piklijst_klaar",),                       # stap 3: piklijst klaar
-    ("pakket_onderweg",),                      # stap 4: pakket onderweg
-]
+_status_info = laad_order_status_info(winkelnaam)
+_status      = _status_info.get("status", "geen_bestelling")
+_bijgewerkt  = _status_info.get("bijgewerkt")
 
 def _stap_klasse(stap_statussen: tuple, huidig: str) -> str:
     volgorde = ["geen_bestelling", "besteld", "piklijst_klaar", "pakket_onderweg"]
@@ -144,6 +139,18 @@ _label = {
     "pakket_onderweg": "Pakket is onderweg naar jouw winkel! 🎉",
 }.get(_status, "")
 
+# Timestamp tonen als de status al bijgewerkt is
+if _bijgewerkt:
+    try:
+        from datetime import datetime as _datetime
+        _ts = _datetime.fromisoformat(_bijgewerkt.replace("Z", "+00:00"))
+        _ts_str = _ts.strftime("%-d %b %H:%M")
+        _tijdlabel = f" <span style='color:#999;font-size:0.85rem'>· bijgewerkt {_ts_str}</span>"
+    except Exception:
+        _tijdlabel = ""
+else:
+    _tijdlabel = ""
+
 st.markdown(f"""
 <div class="status-balk">
   <span class="status-stap {_s1}">✅ Bestelling ontvangen</span>
@@ -151,7 +158,7 @@ st.markdown(f"""
   <span class="status-stap {_s2}">📋 Piklijst klaar</span>
   <span class="status-pijl">›</span>
   <span class="status-stap {_s3}">🚚 Pakket onderweg</span>
-  &nbsp;·&nbsp; <span style="color:#555">{_icoon} {_label}</span>
+  &nbsp;·&nbsp; <span style="color:#555">{_icoon} {_label}</span>{_tijdlabel}
 </div>
 """, unsafe_allow_html=True)
 
@@ -243,8 +250,18 @@ for sectie_dbo in dbo_secties:
                     label_visibility="collapsed",
                 )
 
+st.markdown("---")
+
+# ─── Onderste opslaanknop ─────────────────────────────────────────────────────
+opslaan_footer = st.button(
+    "💾  Sla bestelling op",
+    type="primary",
+    use_container_width=True,
+    key="opslaan_footer",
+)
+
 # ─── Opslaan afhandelen ───────────────────────────────────────────────────────
-if opslaan:
+if opslaan or opslaan_footer:
     nieuwe_orders = {}
     for art in artikelen_db:
         ean = art["ean"]
