@@ -1,6 +1,7 @@
 """
 Supabase database verbinding en helpers.
 """
+import datetime
 import time
 import streamlit as st
 from supabase import create_client, Client
@@ -43,7 +44,6 @@ def get_client() -> Client:
 
 
 # ─── Artikelen ────────────────────────────────────────────────────────────────
-
 def update_pad_codes(pad_codes: dict):
     """
     Update pad_code voor bestaande artikelen.
@@ -78,7 +78,6 @@ def laad_artikelen():
 
 
 # ─── Bestellingen lezen ───────────────────────────────────────────────────────
-
 def laad_bestelling(winkelnaam: str) -> dict:
     """Geeft {ean: quantity} dict voor de winkel."""
     db = get_client()
@@ -120,24 +119,29 @@ def laad_alle_dbo_bestellingen() -> dict:
 
 
 def bestelling_status() -> list:
-    """Geeft per winkel het aantal ingevulde regels."""
+    """Geeft per winkel het aantal ingevulde regels én totaal aantal stuks."""
     db = get_client()
     rows = db.table("store_orders") \
              .select("store_name, quantity") \
              .gt("quantity", 0) \
              .execute()
     counts = {}
+    stuks = {}
     for r in rows.data:
         counts[r["store_name"]] = counts.get(r["store_name"], 0) + 1
+        stuks[r["store_name"]]  = stuks.get(r["store_name"], 0) + (r["quantity"] or 0)
     winkels = db.table("stores").select("name").order("name").execute()
     return [
-        {"winkel": w["name"], "regels": counts.get(w["name"], 0)}
+        {
+            "winkel": w["name"],
+            "regels": counts.get(w["name"], 0),
+            "stuks":  stuks.get(w["name"], 0),
+        }
         for w in winkels.data
     ]
 
 
 # ─── Bestellingen opslaan ─────────────────────────────────────────────────────
-
 def sla_bestelling_op(winkelnaam: str, orders: dict):
     """
     Sla bestellingen op. orders = {ean: quantity}
@@ -152,6 +156,8 @@ def sla_bestelling_op(winkelnaam: str, orders: dict):
     ]
     if rijen:
         db.table("store_orders").insert(rijen).execute()
+    # Status bijwerken: winkel heeft besteld
+    update_order_status(winkelnaam, "besteld")
 
 
 def sla_dbo_op(winkelnaam: str, dbo_regels: list):
@@ -171,7 +177,6 @@ def sla_dbo_op(winkelnaam: str, dbo_regels: list):
 
 
 # ─── SAP data ─────────────────────────────────────────────────────────────────
-
 def sla_sap_op(winkelnaam: str, sap_data: list):
     """sap_data = [{ean, artikel, stuks_verkocht, voorraad_centraal}]"""
     db = get_client()
@@ -182,17 +187,14 @@ def sla_sap_op(winkelnaam: str, sap_data: list):
         if ean not in gezien:
             gezien[ean] = {"store_name": winkelnaam, **r}
         else:
-            # Stuks optellen bij duplicaat EAN
             gezien[ean]["stuks_verkocht"] = (
                 gezien[ean].get("stuks_verkocht", 0) + r.get("stuks_verkocht", 0)
             )
     rijen = list(gezien.values())
     if rijen:
-        # Upsert: insert of update als (store_name, ean) al bestaat
         db.table("sap_data").upsert(
             rijen, on_conflict="store_name,ean"
         ).execute()
-        # Verwijder daarna regels die niet meer in de nieuwe upload zitten
         nieuwe_eans = [r["ean"] for r in rijen]
         db.table("sap_data") \
           .delete() \
@@ -221,7 +223,6 @@ def laad_alle_sap() -> dict:
 
 
 # ─── Piklijst-correcties ──────────────────────────────────────────────────────
-
 def sla_piklijst_correcties_op(winkelnaam: str, artikelen_lijst: list):
     """
     Sla piklijst-data op als startpunt voor correcties.
@@ -242,14 +243,14 @@ def sla_piklijst_correcties_op(winkelnaam: str, artikelen_lijst: list):
             "sectie":            art.get("sectie") or "",
             "pad_code":          art.get("pad_code") or "",
             "piklijst_aantal":   totaal,
-            "definitief_aantal": totaal,   # start gelijk aan piklijst
+            "definitief_aantal": totaal,
         })
     if rijen:
         db.table("piklijst_correcties").insert(rijen).execute()
 
 
 def laad_piklijst_correcties(winkelnaam: str) -> list:
-    """Geeft correctie-regels voor een winkel: [{id, ean, artikel, sectie, pad_code, piklijst_aantal, definitief_aantal}]"""
+    """Geeft correctie-regels voor een winkel."""
     db = get_client()
     rows = _retry(lambda: db.table("piklijst_correcties")
                              .select("*")
@@ -284,8 +285,106 @@ def laad_winkels_met_correcties() -> list:
     return namen
 
 
-# ─── Reset ───────────────────────────────────────────────────────────────────
+# ─── Orderhistoriek ───────────────────────────────────────────────────────────
+def sla_order_history_op(winkelnaam: str, artikelen: list):
+    """
+    Sla een snapshot op van de gegenereerde piklijst.
+    Wordt aangeroepen vanuit 2_Beheer.py bij het genereren van piklijsten.
+    artikelen = output van bouw_artikellijst()
+    """
+    db = get_client()
+    nu = datetime.datetime.now()
+    weeknummer = nu.isocalendar()[1]
+    jaar = nu.year
+    totaal_stuks  = sum((a.get("besteld") or 0) + (a.get("sap") or 0) for a in artikelen)
+    totaal_regels = len([a for a in artikelen if ((a.get("besteld") or 0) + (a.get("sap") or 0)) > 0])
+    # Compacte snapshot — alleen noodzakelijke velden
+    snapshot = [
+        {
+            "ean":     a.get("ean"),
+            "artikel": a.get("artikel"),
+            "sectie":  a.get("sectie"),
+            "pad":     a.get("pad_code"),
+            "besteld": a.get("besteld") or 0,
+            "sap":     a.get("sap") or 0,
+            "totaal":  (a.get("besteld") or 0) + (a.get("sap") or 0),
+        }
+        for a in artikelen
+        if ((a.get("besteld") or 0) + (a.get("sap") or 0)) > 0
+    ]
+    db.table("order_history").insert({
+        "winkelnaam":    winkelnaam,
+        "datum":         nu.isoformat(),
+        "weeknummer":    weeknummer,
+        "jaar":          jaar,
+        "totaal_stuks":  totaal_stuks,
+        "totaal_regels": totaal_regels,
+        "artikelen":     snapshot,
+    }).execute()
 
+
+def laad_order_history(winkelnaam: str = None, limit: int = 100) -> list:
+    """
+    Laad orderhistoriek (zonder artikelen-detail, voor overzicht).
+    Optioneel gefilterd op winkel.
+    """
+    db = get_client()
+    query = (
+        db.table("order_history")
+          .select("id, winkelnaam, datum, weeknummer, jaar, totaal_stuks, totaal_regels")
+          .order("datum", desc=True)
+          .limit(limit)
+    )
+    if winkelnaam:
+        query = query.eq("winkelnaam", winkelnaam)
+    rows = _retry(lambda: query.execute())
+    return rows.data
+
+
+def laad_history_detail(history_id: int) -> dict:
+    """Laad de volledige snapshot (inclusief artikelen) voor één historiek-regel."""
+    db = get_client()
+    rows = _retry(lambda: db.table("order_history")
+                             .select("*")
+                             .eq("id", history_id)
+                             .execute())
+    return rows.data[0] if rows.data else {}
+
+
+# ─── Order-status (terugkoppeling aan winkels) ────────────────────────────────
+def update_order_status(winkelnaam: str, status: str):
+    """
+    Zet de status voor een winkel.
+    Waarden: 'geen_bestelling' | 'besteld' | 'piklijst_klaar' | 'pakket_onderweg'
+    """
+    db = get_client()
+    db.table("order_status").upsert({
+        "winkelnaam": winkelnaam,
+        "status":     status,
+        "bijgewerkt": datetime.datetime.now().isoformat(),
+    }, on_conflict="winkelnaam").execute()
+
+
+def laad_order_statussen() -> dict:
+    """Geeft {winkelnaam: {status, bijgewerkt}} voor alle winkels."""
+    db = get_client()
+    rows = _retry(lambda: db.table("order_status").select("*").execute())
+    return {r["winkelnaam"]: r for r in rows.data}
+
+
+def laad_order_status(winkelnaam: str) -> str:
+    """Geeft de huidige status voor één winkel."""
+    db = get_client()
+    rows = _retry(lambda: db.table("order_status")
+                             .select("status")
+                             .eq("winkelnaam", winkelnaam)
+                             .execute())
+    if rows.data:
+        return rows.data[0]["status"]
+    return "geen_bestelling"
+
+
+# ─── Reset ───────────────────────────────────────────────────────────────────
 def reset_alle_bestellingen():
     """Verwijder alle bestellingen van alle winkels."""
     db = get_client()
@@ -294,15 +393,15 @@ def reset_alle_bestellingen():
 
 
 def reset_winkel_bestellingen(winkel_namen: list):
-    """Verwijder bestellingen van geselecteerde winkels."""
+    """Verwijder bestellingen van geselecteerde winkels en reset hun status."""
     db = get_client()
     for naam in winkel_namen:
         db.table("store_orders").delete().eq("store_name", naam).execute()
         db.table("dbo_orders").delete().eq("store_name", naam).execute()
+        update_order_status(naam, "geen_bestelling")
 
 
 # ─── Winkels ─────────────────────────────────────────────────────────────────
-
 @st.cache_data(ttl=300)
 def laad_winkels() -> list:
     db = get_client()
@@ -314,7 +413,6 @@ def controleer_pin(winkelnaam: str, pin: str) -> bool:
     try:
         winkels = laad_winkels()
     except Exception:
-        # Verbindingsfout: cache leegmaken zodat de volgende poging opnieuw probeert
         st.cache_resource.clear()
         st.cache_data.clear()
         st.error("⚠️ Verbindingsprobleem. Ververs de pagina en probeer opnieuw.")
