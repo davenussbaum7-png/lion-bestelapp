@@ -202,6 +202,9 @@ totaal_ingevuld = sum(
 st.info(f"**{totaal_ingevuld} stuks** ingevuld in huidige bestelling")
 
 # ─── Artikelen per sectie ─────────────────────────────────────────────────────
+if zoekterm.strip() and not gefilterd:
+    st.warning(f"Geen artikelen gevonden voor **'{zoekterm.strip()}'**. Controleer de spelling of probeer een andere zoekterm.")
+
 secties = {}
 for art in gefilterd:
     s = art.get("sectie") or "Overig"
