@@ -1,454 +1,485 @@
 """
-Supabase database verbinding en helpers.
+Lion Beddenshop — Lokale SQLite database.
+Alle data wordt opgeslagen in lion_app.db naast app.py.
+Geen Supabase of internetverbinding nodig voor de data.
 """
+import json
+import os
+import sqlite3
 import datetime
-import time
 import streamlit as st
-from supabase import create_client, Client
 
 
-def _retry(func, max_pogingen=3):
-    """
-    Voer een callable uit met retry bij netwerk- of verbindingsfouten.
-    Gebruik: _retry(lambda: db.table(...).execute())
-    """
-    laatste_fout = None
-    for poging in range(max_pogingen):
-        try:
-            return func()
-        except Exception as fout:
-            laatste_fout = fout
-            if poging < max_pogingen - 1:
-                time.sleep(2 ** poging)   # 1s, dan 2s
-    raise laatste_fout
+# ─── Pad naar de database ─────────────────────────────────────────────────────
+def _db_pad() -> str:
+    basis = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(basis, "lion_app.db")
 
 
-@st.cache_resource(ttl=3600)
-def get_client() -> Client:
-    """
-    Verbinding met Supabase. Probeert 3 keer bij opstartproblemen.
-    TTL van 1 uur zorgt dat een slechte verbinding zichzelf herstelt.
-    """
-    laatste_fout = None
-    for poging in range(3):
-        try:
-            url = st.secrets["supabase_url"]
-            key = st.secrets["supabase_key"]
-            client = create_client(url, key)
-            return client
-        except Exception as fout:
-            laatste_fout = fout
-            if poging < 2:
-                time.sleep(2 ** poging)   # wacht 1s, daarna 2s
-    raise laatste_fout
+def _conn() -> sqlite3.Connection:
+    c = sqlite3.connect(_db_pad(), check_same_thread=False)
+    c.row_factory = sqlite3.Row
+    c.execute("PRAGMA journal_mode=WAL")
+    return c
+
+
+def _rows(cursor) -> list:
+    return [dict(r) for r in cursor.fetchall()]
+
+
+# ─── Database aanmaken ────────────────────────────────────────────────────────
+def init_db():
+    with _conn() as c:
+        c.executescript("""
+        CREATE TABLE IF NOT EXISTS stores (
+            name TEXT PRIMARY KEY,
+            pin  TEXT
+        );
+        CREATE TABLE IF NOT EXISTS articles (
+            ean      TEXT PRIMARY KEY,
+            artikel  TEXT,
+            sectie   TEXT,
+            volgorde INTEGER DEFAULT 9999,
+            pad_code TEXT
+        );
+        CREATE TABLE IF NOT EXISTS store_orders (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            store_name TEXT NOT NULL,
+            ean        TEXT NOT NULL,
+            quantity   INTEGER DEFAULT 0,
+            UNIQUE(store_name, ean)
+        );
+        CREATE TABLE IF NOT EXISTS dbo_orders (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            store_name TEXT NOT NULL,
+            sectie     TEXT,
+            artikel    TEXT,
+            quantity   INTEGER DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS sap_data (
+            store_name        TEXT NOT NULL,
+            ean               TEXT NOT NULL,
+            artikel           TEXT,
+            stuks_verkocht    INTEGER DEFAULT 0,
+            voorraad_centraal INTEGER DEFAULT 0,
+            PRIMARY KEY (store_name, ean)
+        );
+        CREATE TABLE IF NOT EXISTS piklijst_correcties (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            winkelnaam        TEXT NOT NULL,
+            ean               TEXT,
+            artikel           TEXT,
+            sectie            TEXT,
+            pad_code          TEXT,
+            piklijst_aantal   INTEGER DEFAULT 0,
+            definitief_aantal INTEGER DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS order_history (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            winkelnaam    TEXT NOT NULL,
+            datum         TEXT NOT NULL,
+            weeknummer    INTEGER,
+            jaar          INTEGER,
+            totaal_stuks  INTEGER DEFAULT 0,
+            totaal_regels INTEGER DEFAULT 0,
+            artikelen     TEXT DEFAULT '[]'
+        );
+        CREATE TABLE IF NOT EXISTS order_status (
+            winkelnaam TEXT PRIMARY KEY,
+            status     TEXT DEFAULT 'geen_bestelling',
+            bijgewerkt TEXT
+        );
+        CREATE TABLE IF NOT EXISTS order_buffer (
+            store_name TEXT NOT NULL,
+            ean        TEXT NOT NULL,
+            quantity   INTEGER DEFAULT 0,
+            PRIMARY KEY (store_name, ean)
+        );
+        """)
+
+init_db()
+
+
+# ─── Winkels ─────────────────────────────────────────────────────────────────
+@st.cache_data(ttl=300)
+def laad_winkels() -> list:
+    with _conn() as c:
+        return _rows(c.execute("SELECT name, pin FROM stores ORDER BY name"))
+
+
+def voeg_winkel_toe(name: str, pin: str = ""):
+    with _conn() as c:
+        c.execute("INSERT OR IGNORE INTO stores (name, pin) VALUES (?, ?)", (name, pin))
+    laad_winkels.clear()
+
+
+def verwijder_winkel(name: str):
+    with _conn() as c:
+        c.execute("DELETE FROM stores WHERE name = ?", (name,))
+        c.execute("DELETE FROM store_orders WHERE store_name = ?", (name,))
+        c.execute("DELETE FROM dbo_orders WHERE store_name = ?", (name,))
+        c.execute("DELETE FROM order_status WHERE winkelnaam = ?", (name,))
+    laad_winkels.clear()
+
+
+def controleer_pin(winkelnaam: str, pin: str) -> bool:
+    for w in laad_winkels():
+        if w["name"].lower() == winkelnaam.lower():
+            return w["pin"] == pin
+    return False
 
 
 # ─── Artikelen ────────────────────────────────────────────────────────────────
-def update_pad_codes(pad_codes: dict):
-    """
-    Update pad_code voor bestaande artikelen.
-    pad_codes = {ean: pad_code}
-    """
-    db = get_client()
-    bijgewerkt = 0
-    for ean, pad in pad_codes.items():
-        if pad:
-            db.table("articles").update({"pad_code": pad}).eq("ean", ean).execute()
-            bijgewerkt += 1
-    laad_artikelen.clear()
-    return bijgewerkt
-
-
 @st.cache_data(ttl=3600)
-def laad_artikelen():
-    """Laad alle artikelen uit de catalogus (gecached, 1 uur geldig)."""
-    db = get_client()
-    alle = []
-    offset = 0
-    while True:
-        resultaat = _retry(lambda o=offset: db.table("articles").select("*").order("volgorde").range(o, o + 999).execute())
-        data = resultaat.data
-        if not data:
-            break
-        alle.extend(data)
-        offset += len(data)
-        if len(data) < 1000:
-            break
-    return alle
+def laad_artikelen() -> list:
+    with _conn() as c:
+        return _rows(c.execute(
+            "SELECT ean, artikel, sectie, volgorde, pad_code "
+            "FROM articles ORDER BY volgorde, artikel"
+        ))
+
+
+def update_pad_codes(pad_codes: dict):
+    with _conn() as c:
+        for ean, pad in pad_codes.items():
+            if pad:
+                c.execute("UPDATE articles SET pad_code = ? WHERE ean = ?", (pad, ean))
+    laad_artikelen.clear()
+    return len([p for p in pad_codes.values() if p])
+
+
+def importeer_artikelen_csv(bestandspad: str, scheidingsteken: str = ";"):
+    """
+    Importeer artikelen vanuit CSV. Verwachte kolommen: ean, artikel, sectie, volgorde, pad_code
+    Geeft het aantal geimporteerde regels terug.
+    """
+    import csv
+    ingevoerd = 0
+    with open(bestandspad, newline="", encoding="utf-8-sig") as f:
+        lezer = csv.DictReader(f, delimiter=scheidingsteken)
+        with _conn() as c:
+            for rij in lezer:
+                ean = (rij.get("ean") or rij.get("EAN") or "").strip()
+                if not ean:
+                    continue
+                vol = rij.get("volgorde", "").strip()
+                c.execute("""
+                    INSERT INTO articles (ean, artikel, sectie, volgorde, pad_code)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(ean) DO UPDATE SET
+                        artikel  = excluded.artikel,
+                        sectie   = excluded.sectie,
+                        volgorde = excluded.volgorde,
+                        pad_code = excluded.pad_code
+                """, (
+                    ean,
+                    (rij.get("artikel") or rij.get("Artikel") or "").strip(),
+                    (rij.get("sectie")  or rij.get("Sectie")  or "").strip(),
+                    int(vol) if vol.isdigit() else 9999,
+                    (rij.get("pad_code") or rij.get("Pad") or "").strip(),
+                ))
+                ingevoerd += 1
+    laad_artikelen.clear()
+    return ingevoerd
 
 
 # ─── Bestellingen lezen ───────────────────────────────────────────────────────
 def laad_bestelling(winkelnaam: str) -> dict:
-    """Geeft {ean: quantity} dict voor de winkel."""
-    db = get_client()
-    rows = _retry(lambda: db.table("store_orders")
-                             .select("ean, quantity")
-                             .eq("store_name", winkelnaam)
-                             .execute())
-    return {r["ean"]: r["quantity"] for r in rows.data}
+    with _conn() as c:
+        rows = _rows(c.execute(
+            "SELECT ean, quantity FROM store_orders WHERE store_name = ?", (winkelnaam,)
+        ))
+    return {r["ean"]: r["quantity"] for r in rows}
 
 
 def laad_dbo_bestelling(winkelnaam: str) -> list:
-    """Geeft lijst van DBO-regels voor de winkel."""
-    db = get_client()
-    rows = _retry(lambda: db.table("dbo_orders")
-                             .select("*")
-                             .eq("store_name", winkelnaam)
-                             .execute())
-    return rows.data
+    with _conn() as c:
+        return _rows(c.execute(
+            "SELECT * FROM dbo_orders WHERE store_name = ? ORDER BY sectie", (winkelnaam,)
+        ))
 
 
 def laad_alle_bestellingen() -> dict:
-    """Geeft {winkelnaam: {ean: quantity}} voor alle winkels."""
-    db = get_client()
-    rows = _retry(lambda: db.table("store_orders").select("store_name, ean, quantity").execute())
+    with _conn() as c:
+        rows = _rows(c.execute("SELECT store_name, ean, quantity FROM store_orders"))
     result = {}
-    for r in rows.data:
+    for r in rows:
         result.setdefault(r["store_name"], {})[r["ean"]] = r["quantity"]
     return result
 
 
 def laad_alle_dbo_bestellingen() -> dict:
-    """Geeft {winkelnaam: [dbo_regels]} voor alle winkels."""
-    db = get_client()
-    rows = db.table("dbo_orders").select("*").execute()
+    with _conn() as c:
+        rows = _rows(c.execute("SELECT * FROM dbo_orders ORDER BY store_name, sectie"))
     result = {}
-    for r in rows.data:
+    for r in rows:
         result.setdefault(r["store_name"], []).append(r)
     return result
 
 
 def bestelling_status() -> list:
-    """Geeft per winkel het aantal ingevulde regels én totaal aantal stuks."""
-    db = get_client()
-    rows = db.table("store_orders") \
-             .select("store_name, quantity") \
-             .gt("quantity", 0) \
-             .execute()
+    with _conn() as c:
+        orders  = _rows(c.execute("SELECT store_name, quantity FROM store_orders WHERE quantity > 0"))
+        winkels = _rows(c.execute("SELECT name FROM stores ORDER BY name"))
     counts = {}
-    stuks = {}
-    for r in rows.data:
+    stuks  = {}
+    for r in orders:
         counts[r["store_name"]] = counts.get(r["store_name"], 0) + 1
-        stuks[r["store_name"]]  = stuks.get(r["store_name"], 0) + (r["quantity"] or 0)
-    winkels = db.table("stores").select("name").order("name").execute()
+        stuks[r["store_name"]]  = stuks.get(r["store_name"],  0) + (r["quantity"] or 0)
     return [
-        {
-            "winkel": w["name"],
-            "regels": counts.get(w["name"], 0),
-            "stuks":  stuks.get(w["name"], 0),
-        }
-        for w in winkels.data
+        {"winkel": w["name"], "regels": counts.get(w["name"], 0), "stuks": stuks.get(w["name"], 0)}
+        for w in winkels
     ]
 
 
 # ─── Bestellingen opslaan ─────────────────────────────────────────────────────
 def sla_bestelling_op(winkelnaam: str, orders: dict):
-    """
-    Sla bestellingen op. orders = {ean: quantity}
-    Nul-regels worden verwijderd.
-    """
-    db = get_client()
-    db.table("store_orders").delete().eq("store_name", winkelnaam).execute()
-    rijen = [
-        {"store_name": winkelnaam, "ean": ean, "quantity": qty}
-        for ean, qty in orders.items()
-        if qty and qty > 0
-    ]
-    if rijen:
-        db.table("store_orders").insert(rijen).execute()
-    # Status bijwerken: winkel heeft besteld
+    with _conn() as c:
+        c.execute("DELETE FROM store_orders WHERE store_name = ?", (winkelnaam,))
+        rijen = [(winkelnaam, ean, qty) for ean, qty in orders.items() if qty and qty > 0]
+        if rijen:
+            c.executemany(
+                "INSERT INTO store_orders (store_name, ean, quantity) VALUES (?, ?, ?)", rijen
+            )
     update_order_status(winkelnaam, "besteld")
 
 
 def sla_dbo_op(winkelnaam: str, dbo_regels: list):
-    """
-    Sla DBO-regels op. dbo_regels = [{sectie, artikel, quantity}]
-    """
-    db = get_client()
-    db.table("dbo_orders").delete().eq("store_name", winkelnaam).execute()
-    rijen = [
-        {"store_name": winkelnaam, "sectie": r["sectie"],
-         "artikel": r["artikel"], "quantity": r["quantity"]}
-        for r in dbo_regels
-        if r.get("quantity", 0) > 0 and r.get("artikel", "").strip()
-    ]
-    if rijen:
-        db.table("dbo_orders").insert(rijen).execute()
+    with _conn() as c:
+        c.execute("DELETE FROM dbo_orders WHERE store_name = ?", (winkelnaam,))
+        rijen = [
+            (winkelnaam, r["sectie"], r["artikel"], r["quantity"])
+            for r in dbo_regels
+            if r.get("quantity", 0) > 0 and r.get("artikel", "").strip()
+        ]
+        if rijen:
+            c.executemany(
+                "INSERT INTO dbo_orders (store_name, sectie, artikel, quantity) VALUES (?, ?, ?, ?)",
+                rijen
+            )
 
 
 # ─── SAP data ─────────────────────────────────────────────────────────────────
 def sla_sap_op(winkelnaam: str, sap_data: list):
-    """sap_data = [{ean, artikel, stuks_verkocht, voorraad_centraal}]"""
-    db = get_client()
-    # Dedupleer op EAN (zelfde EAN in meerdere secties samenvoegen)
     gezien = {}
     for r in sap_data:
         ean = r.get("ean")
         if ean not in gezien:
-            gezien[ean] = {"store_name": winkelnaam, **r}
+            gezien[ean] = dict(r)
         else:
             gezien[ean]["stuks_verkocht"] = (
                 gezien[ean].get("stuks_verkocht", 0) + r.get("stuks_verkocht", 0)
             )
-    rijen = list(gezien.values())
-    if rijen:
-        db.table("sap_data").upsert(
-            rijen, on_conflict="store_name,ean"
-        ).execute()
-        nieuwe_eans = [r["ean"] for r in rijen]
-        db.table("sap_data") \
-          .delete() \
-          .eq("store_name", winkelnaam) \
-          .not_.in_("ean", nieuwe_eans) \
-          .execute()
-    else:
-        db.table("sap_data").delete().eq("store_name", winkelnaam).execute()
+    with _conn() as c:
+        c.execute("DELETE FROM sap_data WHERE store_name = ?", (winkelnaam,))
+        rijen = [
+            (winkelnaam, v["ean"], v.get("artikel", ""),
+             v.get("stuks_verkocht", 0), v.get("voorraad_centraal", 0))
+            for v in gezien.values()
+        ]
+        if rijen:
+            c.executemany(
+                "INSERT OR REPLACE INTO sap_data "
+                "(store_name, ean, artikel, stuks_verkocht, voorraad_centraal) VALUES (?, ?, ?, ?, ?)",
+                rijen
+            )
 
 
 def laad_sap(winkelnaam: str) -> dict:
-    """Geeft {ean: {stuks_verkocht, voorraad_centraal, artikel}} voor een winkel."""
-    db = get_client()
-    rows = db.table("sap_data").select("*").eq("store_name", winkelnaam).execute()
-    return {r["ean"]: r for r in rows.data}
+    with _conn() as c:
+        rows = _rows(c.execute("SELECT * FROM sap_data WHERE store_name = ?", (winkelnaam,)))
+    return {r["ean"]: r for r in rows}
 
 
 def laad_alle_sap() -> dict:
-    """Geeft {winkelnaam: {ean: sap_dict}} voor alle winkels."""
-    db = get_client()
-    rows = db.table("sap_data").select("*").execute()
+    with _conn() as c:
+        rows = _rows(c.execute("SELECT * FROM sap_data"))
     result = {}
-    for r in rows.data:
+    for r in rows:
         result.setdefault(r["store_name"], {})[r["ean"]] = r
     return result
 
 
 # ─── Piklijst-correcties ──────────────────────────────────────────────────────
 def sla_piklijst_correcties_op(winkelnaam: str, artikelen_lijst: list):
-    """
-    Sla piklijst-data op als startpunt voor correcties.
-    artikelen_lijst = output van bouw_artikellijst()
-    Overschrijft bestaande correcties voor deze winkel.
-    """
-    db = get_client()
-    db.table("piklijst_correcties").delete().eq("winkelnaam", winkelnaam).execute()
-    rijen = []
-    for art in artikelen_lijst:
-        totaal = (art.get("besteld") or 0) + (art.get("sap") or 0)
-        if totaal <= 0:
-            continue
-        rijen.append({
-            "winkelnaam":        winkelnaam,
-            "ean":               art.get("ean") or None,
-            "artikel":           art.get("artikel") or "",
-            "sectie":            art.get("sectie") or "",
-            "pad_code":          art.get("pad_code") or "",
-            "piklijst_aantal":   totaal,
-            "definitief_aantal": totaal,
-        })
-    if rijen:
-        db.table("piklijst_correcties").insert(rijen).execute()
+    with _conn() as c:
+        c.execute("DELETE FROM piklijst_correcties WHERE winkelnaam = ?", (winkelnaam,))
+        rijen = []
+        for art in artikelen_lijst:
+            totaal = (art.get("besteld") or 0) + (art.get("sap") or 0)
+            if totaal <= 0:
+                continue
+            rijen.append((
+                winkelnaam, art.get("ean"), art.get("artikel", ""),
+                art.get("sectie", ""), art.get("pad_code", ""), totaal, totaal,
+            ))
+        if rijen:
+            c.executemany(
+                "INSERT INTO piklijst_correcties "
+                "(winkelnaam, ean, artikel, sectie, pad_code, piklijst_aantal, definitief_aantal) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                rijen
+            )
 
 
 def laad_piklijst_correcties(winkelnaam: str) -> list:
-    """Geeft correctie-regels voor een winkel."""
-    db = get_client()
-    rows = _retry(lambda: db.table("piklijst_correcties")
-                             .select("*")
-                             .eq("winkelnaam", winkelnaam)
-                             .order("pad_code")
-                             .order("artikel")
-                             .execute())
-    return rows.data
+    with _conn() as c:
+        return _rows(c.execute(
+            "SELECT * FROM piklijst_correcties WHERE winkelnaam = ? ORDER BY pad_code, artikel",
+            (winkelnaam,)
+        ))
 
 
 def sla_definitief_op(winkelnaam: str, correcties: list):
-    """
-    Sla definitieve aantallen op.
-    correcties = [{id, definitief_aantal}]
-    """
-    db = get_client()
-    for c in correcties:
-        db.table("piklijst_correcties") \
-          .update({"definitief_aantal": c["definitief_aantal"]}) \
-          .eq("id", c["id"]) \
-          .eq("winkelnaam", winkelnaam) \
-          .execute()
+    with _conn() as c:
+        for corr in correcties:
+            c.execute(
+                "UPDATE piklijst_correcties SET definitief_aantal = ? WHERE id = ? AND winkelnaam = ?",
+                (corr["definitief_aantal"], corr["id"], winkelnaam)
+            )
 
 
 def laad_winkels_met_correcties() -> list:
-    """Geeft lijst van winkelnamen die correctie-regels hebben."""
-    db = get_client()
-    rows = _retry(lambda: db.table("piklijst_correcties")
-                             .select("winkelnaam")
-                             .execute())
-    namen = sorted({r["winkelnaam"] for r in rows.data})
-    return namen
+    with _conn() as c:
+        rows = _rows(c.execute(
+            "SELECT DISTINCT winkelnaam FROM piklijst_correcties ORDER BY winkelnaam"
+        ))
+    return [r["winkelnaam"] for r in rows]
 
 
 # ─── Orderhistoriek ───────────────────────────────────────────────────────────
 def sla_order_history_op(winkelnaam: str, artikelen: list):
-    """
-    Sla een snapshot op van de gegenereerde piklijst.
-    Wordt aangeroepen vanuit 2_Beheer.py bij het genereren van piklijsten.
-    artikelen = output van bouw_artikellijst()
-    """
-    db = get_client()
     nu = datetime.datetime.now()
-    weeknummer = nu.isocalendar()[1]
-    jaar = nu.year
-    totaal_stuks  = sum((a.get("besteld") or 0) + (a.get("sap") or 0) for a in artikelen)
-    totaal_regels = len([a for a in artikelen if ((a.get("besteld") or 0) + (a.get("sap") or 0)) > 0])
-    # Compacte snapshot — alleen noodzakelijke velden
     snapshot = [
-        {
-            "ean":     a.get("ean"),
-            "artikel": a.get("artikel"),
-            "sectie":  a.get("sectie"),
-            "pad":     a.get("pad_code"),
-            "besteld": a.get("besteld") or 0,
-            "sap":     a.get("sap") or 0,
-            "totaal":  (a.get("besteld") or 0) + (a.get("sap") or 0),
-        }
-        for a in artikelen
-        if ((a.get("besteld") or 0) + (a.get("sap") or 0)) > 0
+        {"ean": a.get("ean"), "artikel": a.get("artikel"), "sectie": a.get("sectie"),
+         "pad": a.get("pad_code"), "besteld": a.get("besteld") or 0,
+         "sap": a.get("sap") or 0,
+         "totaal": (a.get("besteld") or 0) + (a.get("sap") or 0)}
+        for a in artikelen if ((a.get("besteld") or 0) + (a.get("sap") or 0)) > 0
     ]
-    db.table("order_history").insert({
-        "winkelnaam":    winkelnaam,
-        "datum":         nu.isoformat(),
-        "weeknummer":    weeknummer,
-        "jaar":          jaar,
-        "totaal_stuks":  totaal_stuks,
-        "totaal_regels": totaal_regels,
-        "artikelen":     snapshot,
-    }).execute()
+    totaal_stuks  = sum(s["totaal"] for s in snapshot)
+    totaal_regels = len(snapshot)
+    with _conn() as c:
+        c.execute(
+            "INSERT INTO order_history "
+            "(winkelnaam, datum, weeknummer, jaar, totaal_stuks, totaal_regels, artikelen) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (winkelnaam, nu.isoformat(), nu.isocalendar()[1], nu.year,
+             totaal_stuks, totaal_regels, json.dumps(snapshot))
+        )
 
 
 def laad_order_history(winkelnaam: str = None, limit: int = 100) -> list:
-    """
-    Laad orderhistoriek (zonder artikelen-detail, voor overzicht).
-    Optioneel gefilterd op winkel.
-    """
-    db = get_client()
-    query = (
-        db.table("order_history")
-          .select("id, winkelnaam, datum, weeknummer, jaar, totaal_stuks, totaal_regels")
-          .order("datum", desc=True)
-          .limit(limit)
-    )
+    sql = ("SELECT id, winkelnaam, datum, weeknummer, jaar, totaal_stuks, totaal_regels "
+           "FROM order_history")
+    params = []
     if winkelnaam:
-        query = query.eq("winkelnaam", winkelnaam)
-    rows = _retry(lambda: query.execute())
-    return rows.data
+        sql += " WHERE winkelnaam = ?"
+        params.append(winkelnaam)
+    sql += " ORDER BY datum DESC LIMIT ?"
+    params.append(limit)
+    with _conn() as c:
+        return _rows(c.execute(sql, params))
 
 
 def laad_history_detail(history_id: int) -> dict:
-    """Laad de volledige snapshot (inclusief artikelen) voor één historiek-regel."""
-    db = get_client()
-    rows = _retry(lambda: db.table("order_history")
-                             .select("*")
-                             .eq("id", history_id)
-                             .execute())
-    return rows.data[0] if rows.data else {}
+    with _conn() as c:
+        rows = _rows(c.execute("SELECT * FROM order_history WHERE id = ?", (history_id,)))
+    if not rows:
+        return {}
+    r = rows[0]
+    try:
+        r["artikelen"] = json.loads(r.get("artikelen") or "[]")
+    except Exception:
+        r["artikelen"] = []
+    return r
 
 
 def wis_order_history(winkelnaam: str = None, voor_datum: str = None):
-    """
-    Wis historiek-regels.
-    - winkelnaam: alleen voor deze winkel (None = alle winkels)
-    - voor_datum: alleen regels vóór deze datum (ISO-string, bijv. '2026-09-01')
-    Beide filters tegelijk zijn mogelijk.
-    """
-    db = get_client()
-    query = db.table("order_history").delete()
+    sql = "DELETE FROM order_history WHERE 1=1"
+    params = []
     if winkelnaam:
-        query = query.eq("winkelnaam", winkelnaam)
+        sql += " AND winkelnaam = ?"
+        params.append(winkelnaam)
     if voor_datum:
-        query = query.lt("datum", voor_datum)
-    if not winkelnaam and not voor_datum:
-        # Veiligheidscheck: voorkom dat je per ongeluk alles wist zonder filter
-        query = query.neq("id", 0)
-    query.execute()
+        sql += " AND datum < ?"
+        params.append(voor_datum)
+    with _conn() as c:
+        c.execute(sql, params)
 
 
-# ─── Order-status (terugkoppeling aan winkels) ────────────────────────────────
+# ─── Order-status ─────────────────────────────────────────────────────────────
 def update_order_status(winkelnaam: str, status: str):
-    """
-    Zet de status voor een winkel.
-    Waarden: 'geen_bestelling' | 'besteld' | 'piklijst_klaar' | 'pakket_onderweg'
-    """
-    db = get_client()
-    db.table("order_status").upsert({
-        "winkelnaam": winkelnaam,
-        "status":     status,
-        "bijgewerkt": datetime.datetime.now().isoformat(),
-    }, on_conflict="winkelnaam").execute()
+    nu = datetime.datetime.now().isoformat()
+    with _conn() as c:
+        c.execute(
+            "INSERT INTO order_status (winkelnaam, status, bijgewerkt) VALUES (?, ?, ?) "
+            "ON CONFLICT(winkelnaam) DO UPDATE SET status = excluded.status, bijgewerkt = excluded.bijgewerkt",
+            (winkelnaam, status, nu)
+        )
 
 
 def laad_order_statussen() -> dict:
-    """Geeft {winkelnaam: {status, bijgewerkt}} voor alle winkels."""
-    db = get_client()
-    rows = _retry(lambda: db.table("order_status").select("*").execute())
-    return {r["winkelnaam"]: r for r in rows.data}
+    with _conn() as c:
+        rows = _rows(c.execute("SELECT * FROM order_status"))
+    return {r["winkelnaam"]: r for r in rows}
 
 
 def laad_order_status(winkelnaam: str) -> str:
-    """Geeft de huidige status voor één winkel."""
-    db = get_client()
-    rows = _retry(lambda: db.table("order_status")
-                             .select("status")
-                             .eq("winkelnaam", winkelnaam)
-                             .execute())
-    if rows.data:
-        return rows.data[0]["status"]
-    return "geen_bestelling"
+    with _conn() as c:
+        rows = _rows(c.execute(
+            "SELECT status FROM order_status WHERE winkelnaam = ?", (winkelnaam,)
+        ))
+    return rows[0]["status"] if rows else "geen_bestelling"
 
 
 def laad_order_status_info(winkelnaam: str) -> dict:
-    """Geeft {status, bijgewerkt} voor één winkel. Gebruikt door winkelpagina voor de statusbalk."""
-    db = get_client()
-    rows = _retry(lambda: db.table("order_status")
-                             .select("status, bijgewerkt")
-                             .eq("winkelnaam", winkelnaam)
-                             .execute())
-    if rows.data:
-        return rows.data[0]
-    return {"status": "geen_bestelling", "bijgewerkt": None}
+    with _conn() as c:
+        rows = _rows(c.execute(
+            "SELECT status, bijgewerkt FROM order_status WHERE winkelnaam = ?", (winkelnaam,)
+        ))
+    return rows[0] if rows else {"status": "geen_bestelling", "bijgewerkt": None}
 
 
-# ─── Reset ───────────────────────────────────────────────────────────────────
+# ─── Reset ────────────────────────────────────────────────────────────────────
 def reset_alle_bestellingen():
-    """Verwijder alle bestellingen van alle winkels."""
-    db = get_client()
-    db.table("store_orders").delete().neq("id", 0).execute()
-    db.table("dbo_orders").delete().neq("id", 0).execute()
+    with _conn() as c:
+        c.execute("DELETE FROM store_orders")
+        c.execute("DELETE FROM dbo_orders")
 
 
 def reset_winkel_bestellingen(winkel_namen: list):
-    """Verwijder bestellingen van geselecteerde winkels en reset hun status."""
-    db = get_client()
+    with _conn() as c:
+        for naam in winkel_namen:
+            c.execute("DELETE FROM store_orders WHERE store_name = ?", (naam,))
+            c.execute("DELETE FROM dbo_orders WHERE store_name = ?", (naam,))
     for naam in winkel_namen:
-        db.table("store_orders").delete().eq("store_name", naam).execute()
-        db.table("dbo_orders").delete().eq("store_name", naam).execute()
         update_order_status(naam, "geen_bestelling")
 
 
-# ─── Winkels ─────────────────────────────────────────────────────────────────
-@st.cache_data(ttl=300)
-def laad_winkels() -> list:
-    db = get_client()
-    rows = _retry(lambda: db.table("stores").select("name, pin").order("name").execute())
-    return rows.data
+# ─── Order-buffer (vorige bestelling onthouden na wissen) ────────────────────
+def sla_buffer_op(winkelnaam: str, orders: dict):
+    """Sla huidige bestellaantallen op als buffer, voordat de bestelling wordt gewist."""
+    with _conn() as c:
+        c.execute("DELETE FROM order_buffer WHERE store_name = ?", (winkelnaam,))
+        rijen = [(winkelnaam, ean, qty) for ean, qty in orders.items() if qty and qty > 0]
+        if rijen:
+            c.executemany(
+                "INSERT INTO order_buffer (store_name, ean, quantity) VALUES (?, ?, ?)", rijen
+            )
 
 
-def controleer_pin(winkelnaam: str, pin: str) -> bool:
-    try:
-        winkels = laad_winkels()
-    except Exception:
-        st.cache_resource.clear()
-        st.cache_data.clear()
-        st.error("⚠️ Verbindingsprobleem. Ververs de pagina en probeer opnieuw.")
-        return False
-    for w in winkels:
-        if w["name"].lower() == winkelnaam.lower():
-            return w["pin"] == pin
-    return False
+def laad_buffer(winkelnaam: str) -> dict:
+    """Laad gebufferde bestelling voor een winkel (aantallen van vorige ronde)."""
+    with _conn() as c:
+        rows = _rows(c.execute(
+            "SELECT ean, quantity FROM order_buffer WHERE store_name = ? AND quantity > 0",
+            (winkelnaam,)
+        ))
+    return {r["ean"]: r["quantity"] for r in rows}
+
+
+def wis_buffer(winkelnaam: str):
+    """Verwijder de buffer nadat de winkel een nieuwe bestelling heeft opgeslagen."""
+    with _conn() as c:
+        c.execute("DELETE FROM order_buffer WHERE store_name = ?", (winkelnaam,))
