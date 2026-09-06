@@ -1,143 +1,59 @@
 """
-Lion Beddenshop — Lokale SQLite database.
-Alle data wordt opgeslagen in lion_app.db naast app.py.
-Geen Supabase of internetverbinding nodig voor de data.
+Lion Beddenshop — Supabase database.
+Verbindt met de Supabase PostgreSQL database via supabase-py.
+Credentials worden geladen vanuit Streamlit Secrets.
 """
 import csv
 import io
 import json
-import os
-import sqlite3
 import datetime
 import streamlit as st
+from supabase import create_client, Client
 
 
-# ─── Pad naar de database ─────────────────────────────────────────────────────
-def _db_pad() -> str:
-    basis = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(basis, "lion_app.db")
+# ─── Supabase client ──────────────────────────────────────────────────────────
+@st.cache_resource
+def _sb() -> Client:
+    url = st.secrets["SUPABASE_URL"]
+    key = st.secrets["SUPABASE_KEY"]
+    return create_client(url, key)
 
 
-def _conn() -> sqlite3.Connection:
-    c = sqlite3.connect(_db_pad(), check_same_thread=False)
-    c.row_factory = sqlite3.Row
-    c.execute("PRAGMA journal_mode=WAL")
-    return c
-
-
-def _rows(cursor) -> list:
-    return [dict(r) for r in cursor.fetchall()]
-
-
-# ─── Database aanmaken ────────────────────────────────────────────────────────
-def init_db():
-    with _conn() as c:
-        c.executescript("""
-        CREATE TABLE IF NOT EXISTS stores (
-            name TEXT PRIMARY KEY,
-            pin  TEXT
-        );
-        CREATE TABLE IF NOT EXISTS articles (
-            ean      TEXT PRIMARY KEY,
-            artikel  TEXT,
-            sectie   TEXT,
-            volgorde INTEGER DEFAULT 9999,
-            pad_code TEXT
-        );
-        CREATE TABLE IF NOT EXISTS store_orders (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            store_name TEXT NOT NULL,
-            ean        TEXT NOT NULL,
-            quantity   INTEGER DEFAULT 0,
-            UNIQUE(store_name, ean)
-        );
-        CREATE TABLE IF NOT EXISTS dbo_orders (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            store_name TEXT NOT NULL,
-            sectie     TEXT,
-            artikel    TEXT,
-            quantity   INTEGER DEFAULT 0
-        );
-        CREATE TABLE IF NOT EXISTS sap_data (
-            store_name        TEXT NOT NULL,
-            ean               TEXT NOT NULL,
-            artikel           TEXT,
-            stuks_verkocht    INTEGER DEFAULT 0,
-            voorraad_centraal INTEGER DEFAULT 0,
-            PRIMARY KEY (store_name, ean)
-        );
-        CREATE TABLE IF NOT EXISTS piklijst_correcties (
-            id                INTEGER PRIMARY KEY AUTOINCREMENT,
-            winkelnaam        TEXT NOT NULL,
-            ean               TEXT,
-            artikel           TEXT,
-            sectie            TEXT,
-            pad_code          TEXT,
-            piklijst_aantal   INTEGER DEFAULT 0,
-            definitief_aantal INTEGER DEFAULT 0
-        );
-        CREATE TABLE IF NOT EXISTS order_history (
-            id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            winkelnaam    TEXT NOT NULL,
-            datum         TEXT NOT NULL,
-            weeknummer    INTEGER,
-            jaar          INTEGER,
-            totaal_stuks  INTEGER DEFAULT 0,
-            totaal_regels INTEGER DEFAULT 0,
-            artikelen     TEXT DEFAULT '[]'
-        );
-        CREATE TABLE IF NOT EXISTS order_status (
-            winkelnaam TEXT PRIMARY KEY,
-            status     TEXT DEFAULT 'geen_bestelling',
-            bijgewerkt TEXT
-        );
-        CREATE TABLE IF NOT EXISTS order_buffer (
-            store_name TEXT NOT NULL,
-            ean        TEXT NOT NULL,
-            quantity   INTEGER DEFAULT 0,
-            PRIMARY KEY (store_name, ean)
-        );
-
-        -- Indexes voor snelle lookups op store_name / winkelnaam
-        CREATE INDEX IF NOT EXISTS idx_store_orders_store    ON store_orders(store_name);
-        CREATE INDEX IF NOT EXISTS idx_dbo_orders_store      ON dbo_orders(store_name);
-        CREATE INDEX IF NOT EXISTS idx_piklijst_corr_winkel  ON piklijst_correcties(winkelnaam);
-        CREATE INDEX IF NOT EXISTS idx_order_history_winkel  ON order_history(winkelnaam, datum);
-        CREATE INDEX IF NOT EXISTS idx_order_buffer_store    ON order_buffer(store_name);
-        """)
-
-init_db()
+def _data(response) -> list:
+    """Haal data op uit Supabase response; geeft lege lijst bij fouten."""
+    return response.data or []
 
 
 # ─── Winkels ──────────────────────────────────────────────────────────────────
 @st.cache_data(ttl=300)
 def laad_winkels() -> list:
-    with _conn() as c:
-        return _rows(c.execute("SELECT name, pin FROM stores ORDER BY name"))
+    resp = _sb().table("stores").select("name, pin").order("name").execute()
+    return _data(resp)
 
 
 def voeg_winkel_toe(name: str, pin: str = ""):
-    with _conn() as c:
-        c.execute("INSERT OR IGNORE INTO stores (name, pin) VALUES (?, ?)", (name, pin))
+    _sb().table("stores").upsert({"name": name, "pin": pin}, on_conflict="name").execute()
     laad_winkels.clear()
 
 
 def verwijder_winkel(name: str):
-    with _conn() as c:
-        c.execute("DELETE FROM stores              WHERE name       = ?", (name,))
-        c.execute("DELETE FROM store_orders        WHERE store_name = ?", (name,))
-        c.execute("DELETE FROM dbo_orders          WHERE store_name = ?", (name,))
-        c.execute("DELETE FROM order_status        WHERE winkelnaam = ?", (name,))
-        c.execute("DELETE FROM piklijst_correcties WHERE winkelnaam = ?", (name,))
-        c.execute("DELETE FROM order_buffer        WHERE store_name = ?", (name,))
-        c.execute("DELETE FROM sap_data            WHERE store_name = ?", (name,))
+    sb = _sb()
+    sb.table("piklijst_correcties").delete().eq("winkelnaam", name).execute()
+    sb.table("order_status").delete().eq("winkelnaam", name).execute()
+    sb.table("dbo_orders").delete().eq("store_name", name).execute()
+    sb.table("store_orders").delete().eq("store_name", name).execute()
+    sb.table("sap_data").delete().eq("store_name", name).execute()
+    try:
+        sb.table("order_buffer").delete().eq("store_name", name).execute()
+    except Exception:
+        pass
+    sb.table("stores").delete().eq("name", name).execute()
     laad_winkels.clear()
 
 
 def stel_pin_in(winkelnaam: str, pin: str):
     """Stel een per-winkel PIN in (of wis met lege string voor fallback-wachtwoord)."""
-    with _conn() as c:
-        c.execute("UPDATE stores SET pin = ? WHERE name = ?", (pin, winkelnaam))
+    _sb().table("stores").update({"pin": pin}).eq("name", winkelnaam).execute()
     laad_winkels.clear()
 
 
@@ -151,29 +67,43 @@ def controleer_pin(winkelnaam: str, pin: str) -> bool:
 # ─── Artikelen ────────────────────────────────────────────────────────────────
 @st.cache_data(ttl=3600)
 def laad_artikelen() -> list:
-    with _conn() as c:
-        return _rows(c.execute(
-            "SELECT ean, artikel, sectie, volgorde, pad_code "
-            "FROM articles ORDER BY volgorde, artikel"
-        ))
+    # Supabase heeft standaard een limit van 1000 rijen; haal alles op in batches
+    alle = []
+    offset = 0
+    batch = 1000
+    while True:
+        resp = (
+            _sb().table("articles")
+            .select("ean, artikel, sectie, volgorde, pad_code")
+            .order("volgorde")
+            .order("artikel")
+            .range(offset, offset + batch - 1)
+            .execute()
+        )
+        rijen = _data(resp)
+        alle.extend(rijen)
+        if len(rijen) < batch:
+            break
+        offset += batch
+    return alle
 
 
 def update_pad_codes(pad_codes: dict):
-    with _conn() as c:
-        for ean, pad in pad_codes.items():
-            if pad:
-                c.execute("UPDATE articles SET pad_code = ? WHERE ean = ?", (pad, ean))
+    sb = _sb()
+    bijgewerkt = 0
+    for ean, pad in pad_codes.items():
+        if pad:
+            sb.table("articles").update({"pad_code": pad}).eq("ean", ean).execute()
+            bijgewerkt += 1
     laad_artikelen.clear()
-    return len([p for p in pad_codes.values() if p])
+    return bijgewerkt
 
 
 def importeer_artikelen_csv(bestandspad: str, scheidingsteken: str = ";"):
     """
     Importeer artikelen vanuit CSV-bestandspad.
     Verwachte kolommen: ean, artikel, sectie, volgorde, pad_code
-    Geeft het aantal geïmporteerde regels terug.
     """
-    ingevoerd = 0
     with open(bestandspad, newline="", encoding="utf-8-sig") as f:
         lezer = csv.DictReader(f, delimiter=scheidingsteken)
         ingevoerd = _importeer_artikelen_rows(lezer)
@@ -198,70 +128,75 @@ def importeer_artikelen_bytes(bestand_bytes: bytes, scheidingsteken: str = ";") 
 
 def _importeer_artikelen_rows(lezer) -> int:
     """Gemeenschappelijke logica voor CSV-import vanuit een DictReader."""
-    ingevoerd = 0
-    with _conn() as c:
-        for rij in lezer:
-            ean = (rij.get("ean") or rij.get("EAN") or "").strip()
-            if not ean:
-                continue
-            vol = (rij.get("volgorde") or "").strip()
-            c.execute("""
-                INSERT INTO articles (ean, artikel, sectie, volgorde, pad_code)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(ean) DO UPDATE SET
-                    artikel  = excluded.artikel,
-                    sectie   = excluded.sectie,
-                    volgorde = excluded.volgorde,
-                    pad_code = excluded.pad_code
-            """, (
-                ean,
-                (rij.get("artikel") or rij.get("Artikel") or "").strip(),
-                (rij.get("sectie")  or rij.get("Sectie")  or "").strip(),
-                int(vol) if vol.isdigit() else 9999,
-                (rij.get("pad_code") or rij.get("Pad") or "").strip(),
-            ))
-            ingevoerd += 1
-    return ingevoerd
+    sb = _sb()
+    rijen = []
+    for rij in lezer:
+        ean = (rij.get("ean") or rij.get("EAN") or "").strip()
+        if not ean:
+            continue
+        vol = (rij.get("volgorde") or "").strip()
+        rijen.append({
+            "ean":      ean,
+            "artikel":  (rij.get("artikel") or rij.get("Artikel") or "").strip(),
+            "sectie":   (rij.get("sectie")  or rij.get("Sectie")  or "").strip(),
+            "volgorde": int(vol) if vol.isdigit() else 9999,
+            "pad_code": (rij.get("pad_code") or rij.get("Pad") or "").strip(),
+        })
+    if rijen:
+        # Upsert in batches van 500
+        for i in range(0, len(rijen), 500):
+            sb.table("articles").upsert(rijen[i:i+500], on_conflict="ean").execute()
+    return len(rijen)
 
 
 # ─── Bestellingen lezen ───────────────────────────────────────────────────────
 def laad_bestelling(winkelnaam: str) -> dict:
-    with _conn() as c:
-        rows = _rows(c.execute(
-            "SELECT ean, quantity FROM store_orders WHERE store_name = ?", (winkelnaam,)
-        ))
-    return {r["ean"]: r["quantity"] for r in rows}
+    resp = (
+        _sb().table("store_orders")
+        .select("ean, quantity")
+        .eq("store_name", winkelnaam)
+        .execute()
+    )
+    return {r["ean"]: r["quantity"] for r in _data(resp)}
 
 
 def laad_dbo_bestelling(winkelnaam: str) -> list:
-    with _conn() as c:
-        return _rows(c.execute(
-            "SELECT * FROM dbo_orders WHERE store_name = ? ORDER BY sectie", (winkelnaam,)
-        ))
+    resp = (
+        _sb().table("dbo_orders")
+        .select("*")
+        .eq("store_name", winkelnaam)
+        .order("sectie")
+        .execute()
+    )
+    return _data(resp)
 
 
 def laad_alle_bestellingen() -> dict:
-    with _conn() as c:
-        rows = _rows(c.execute("SELECT store_name, ean, quantity FROM store_orders"))
+    resp = _sb().table("store_orders").select("store_name, ean, quantity").execute()
     result = {}
-    for r in rows:
+    for r in _data(resp):
         result.setdefault(r["store_name"], {})[r["ean"]] = r["quantity"]
     return result
 
 
 def laad_alle_dbo_bestellingen() -> dict:
-    with _conn() as c:
-        rows = _rows(c.execute("SELECT * FROM dbo_orders ORDER BY store_name, sectie"))
+    resp = (
+        _sb().table("dbo_orders")
+        .select("*")
+        .order("store_name")
+        .order("sectie")
+        .execute()
+    )
     result = {}
-    for r in rows:
+    for r in _data(resp):
         result.setdefault(r["store_name"], []).append(r)
     return result
 
 
 def bestelling_status() -> list:
-    with _conn() as c:
-        orders  = _rows(c.execute("SELECT store_name, quantity FROM store_orders WHERE quantity > 0"))
-        winkels = _rows(c.execute("SELECT name FROM stores ORDER BY name"))
+    sb = _sb()
+    orders  = _data(sb.table("store_orders").select("store_name, quantity").gt("quantity", 0).execute())
+    winkels = _data(sb.table("stores").select("name").order("name").execute())
     counts = {}
     stuks  = {}
     for r in orders:
@@ -275,33 +210,33 @@ def bestelling_status() -> list:
 
 # ─── Bestellingen opslaan ─────────────────────────────────────────────────────
 def sla_bestelling_op(winkelnaam: str, orders: dict):
-    with _conn() as c:
-        c.execute("DELETE FROM store_orders WHERE store_name = ?", (winkelnaam,))
-        rijen = [(winkelnaam, ean, qty) for ean, qty in orders.items() if qty and qty > 0]
-        if rijen:
-            c.executemany(
-                "INSERT INTO store_orders (store_name, ean, quantity) VALUES (?, ?, ?)", rijen
-            )
+    sb = _sb()
+    sb.table("store_orders").delete().eq("store_name", winkelnaam).execute()
+    rijen = [
+        {"store_name": winkelnaam, "ean": ean, "quantity": qty}
+        for ean, qty in orders.items() if qty and qty > 0
+    ]
+    if rijen:
+        sb.table("store_orders").insert(rijen).execute()
     update_order_status(winkelnaam, "besteld")
 
 
 def sla_dbo_op(winkelnaam: str, dbo_regels: list):
-    with _conn() as c:
-        c.execute("DELETE FROM dbo_orders WHERE store_name = ?", (winkelnaam,))
-        rijen = [
-            (winkelnaam, r["sectie"], r["artikel"], r["quantity"])
-            for r in dbo_regels
-            if r.get("quantity", 0) > 0 and r.get("artikel", "").strip()
-        ]
-        if rijen:
-            c.executemany(
-                "INSERT INTO dbo_orders (store_name, sectie, artikel, quantity) VALUES (?, ?, ?, ?)",
-                rijen
-            )
+    sb = _sb()
+    sb.table("dbo_orders").delete().eq("store_name", winkelnaam).execute()
+    rijen = [
+        {"store_name": winkelnaam, "sectie": r["sectie"],
+         "artikel": r["artikel"], "quantity": r["quantity"]}
+        for r in dbo_regels
+        if r.get("quantity", 0) > 0 and r.get("artikel", "").strip()
+    ]
+    if rijen:
+        sb.table("dbo_orders").insert(rijen).execute()
 
 
 # ─── SAP data ─────────────────────────────────────────────────────────────────
 def sla_sap_op(winkelnaam: str, sap_data: list):
+    # Dedupliceer op EAN (stuks_verkocht optellen bij duplicaten)
     gezien = {}
     for r in sap_data:
         ean = r.get("ean")
@@ -311,81 +246,90 @@ def sla_sap_op(winkelnaam: str, sap_data: list):
             gezien[ean]["stuks_verkocht"] = (
                 gezien[ean].get("stuks_verkocht", 0) + r.get("stuks_verkocht", 0)
             )
-    with _conn() as c:
-        c.execute("DELETE FROM sap_data WHERE store_name = ?", (winkelnaam,))
-        rijen = [
-            (winkelnaam, v["ean"], v.get("artikel", ""),
-             v.get("stuks_verkocht", 0), v.get("voorraad_centraal", 0))
-            for v in gezien.values()
-        ]
-        if rijen:
-            c.executemany(
-                "INSERT OR REPLACE INTO sap_data "
-                "(store_name, ean, artikel, stuks_verkocht, voorraad_centraal) VALUES (?, ?, ?, ?, ?)",
-                rijen
-            )
+    sb = _sb()
+    sb.table("sap_data").delete().eq("store_name", winkelnaam).execute()
+    rijen = [
+        {
+            "store_name":        winkelnaam,
+            "ean":               v["ean"],
+            "artikel":           v.get("artikel", ""),
+            "stuks_verkocht":    v.get("stuks_verkocht", 0),
+            "voorraad_centraal": v.get("voorraad_centraal", 0),
+        }
+        for v in gezien.values()
+        if v.get("ean")
+    ]
+    if rijen:
+        sb.table("sap_data").insert(rijen).execute()
 
 
 def laad_sap(winkelnaam: str) -> dict:
-    with _conn() as c:
-        rows = _rows(c.execute("SELECT * FROM sap_data WHERE store_name = ?", (winkelnaam,)))
-    return {r["ean"]: r for r in rows}
+    resp = _sb().table("sap_data").select("*").eq("store_name", winkelnaam).execute()
+    return {r["ean"]: r for r in _data(resp)}
 
 
 def laad_alle_sap() -> dict:
-    with _conn() as c:
-        rows = _rows(c.execute("SELECT * FROM sap_data"))
+    resp = _sb().table("sap_data").select("*").execute()
     result = {}
-    for r in rows:
+    for r in _data(resp):
         result.setdefault(r["store_name"], {})[r["ean"]] = r
     return result
 
 
 # ─── Piklijst-correcties ──────────────────────────────────────────────────────
 def sla_piklijst_correcties_op(winkelnaam: str, artikelen_lijst: list):
-    with _conn() as c:
-        c.execute("DELETE FROM piklijst_correcties WHERE winkelnaam = ?", (winkelnaam,))
-        rijen = []
-        for art in artikelen_lijst:
-            totaal = (art.get("besteld") or 0) + (art.get("sap") or 0)
-            if totaal <= 0:
-                continue
-            rijen.append((
-                winkelnaam, art.get("ean"), art.get("artikel", ""),
-                art.get("sectie", ""), art.get("pad_code", ""), totaal, totaal,
-            ))
-        if rijen:
-            c.executemany(
-                "INSERT INTO piklijst_correcties "
-                "(winkelnaam, ean, artikel, sectie, pad_code, piklijst_aantal, definitief_aantal) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                rijen
-            )
+    sb = _sb()
+    sb.table("piklijst_correcties").delete().eq("winkelnaam", winkelnaam).execute()
+    rijen = []
+    for art in artikelen_lijst:
+        totaal = (art.get("besteld") or 0) + (art.get("sap") or 0)
+        if totaal <= 0:
+            continue
+        rijen.append({
+            "winkelnaam":        winkelnaam,
+            "ean":               art.get("ean"),
+            "artikel":           art.get("artikel", ""),
+            "sectie":            art.get("sectie", ""),
+            "pad_code":          art.get("pad_code", ""),
+            "piklijst_aantal":   totaal,
+            "definitief_aantal": totaal,
+        })
+    if rijen:
+        sb.table("piklijst_correcties").insert(rijen).execute()
 
 
 def laad_piklijst_correcties(winkelnaam: str) -> list:
-    with _conn() as c:
-        return _rows(c.execute(
-            "SELECT * FROM piklijst_correcties WHERE winkelnaam = ? ORDER BY pad_code, artikel",
-            (winkelnaam,)
-        ))
+    resp = (
+        _sb().table("piklijst_correcties")
+        .select("*")
+        .eq("winkelnaam", winkelnaam)
+        .order("pad_code")
+        .order("artikel")
+        .execute()
+    )
+    return _data(resp)
 
 
 def sla_definitief_op(winkelnaam: str, correcties: list):
-    with _conn() as c:
-        for corr in correcties:
-            c.execute(
-                "UPDATE piklijst_correcties SET definitief_aantal = ? WHERE id = ? AND winkelnaam = ?",
-                (corr["definitief_aantal"], corr["id"], winkelnaam)
-            )
+    sb = _sb()
+    for corr in correcties:
+        sb.table("piklijst_correcties").update(
+            {"definitief_aantal": corr["definitief_aantal"]}
+        ).eq("id", corr["id"]).eq("winkelnaam", winkelnaam).execute()
 
 
 def laad_winkels_met_correcties() -> list:
-    with _conn() as c:
-        rows = _rows(c.execute(
-            "SELECT DISTINCT winkelnaam FROM piklijst_correcties ORDER BY winkelnaam"
-        ))
-    return [r["winkelnaam"] for r in rows]
+    resp = (
+        _sb().table("piklijst_correcties")
+        .select("winkelnaam")
+        .order("winkelnaam")
+        .execute()
+    )
+    gezien = []
+    for r in _data(resp):
+        if r["winkelnaam"] not in gezien:
+            gezien.append(r["winkelnaam"])
+    return gezien
 
 
 # ─── Orderhistoriek ───────────────────────────────────────────────────────────
@@ -398,83 +342,96 @@ def sla_order_history_op(winkelnaam: str, artikelen: list):
          "totaal": (a.get("besteld") or 0) + (a.get("sap") or 0)}
         for a in artikelen if ((a.get("besteld") or 0) + (a.get("sap") or 0)) > 0
     ]
-    totaal_stuks  = sum(s["totaal"] for s in snapshot)
-    totaal_regels = len(snapshot)
-    with _conn() as c:
-        c.execute(
-            "INSERT INTO order_history "
-            "(winkelnaam, datum, weeknummer, jaar, totaal_stuks, totaal_regels, artikelen) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (winkelnaam, nu.isoformat(), nu.isocalendar()[1], nu.year,
-             totaal_stuks, totaal_regels, json.dumps(snapshot))
-        )
+    _sb().table("order_history").insert({
+        "winkelnaam":    winkelnaam,
+        "datum":         nu.isoformat(),
+        "weeknummer":    nu.isocalendar()[1],
+        "jaar":          nu.year,
+        "totaal_stuks":  sum(s["totaal"] for s in snapshot),
+        "totaal_regels": len(snapshot),
+        "artikelen":     json.dumps(snapshot),
+    }).execute()
 
 
 def laad_order_history(winkelnaam: str = None, limit: int = 100) -> list:
-    sql = ("SELECT id, winkelnaam, datum, weeknummer, jaar, totaal_stuks, totaal_regels "
-           "FROM order_history")
-    params = []
+    q = (
+        _sb().table("order_history")
+        .select("id, winkelnaam, datum, weeknummer, jaar, totaal_stuks, totaal_regels")
+        .order("datum", desc=True)
+        .limit(limit)
+    )
     if winkelnaam:
-        sql += " WHERE winkelnaam = ?"
-        params.append(winkelnaam)
-    sql += " ORDER BY datum DESC LIMIT ?"
-    params.append(limit)
-    with _conn() as c:
-        return _rows(c.execute(sql, params))
+        q = q.eq("winkelnaam", winkelnaam)
+    return _data(q.execute())
+
+
+def laad_history_detail(history_id: int) -> dict:
+    resp = _sb().table("order_history").select("*").eq("id", history_id).execute()
+    rows = _data(resp)
+    if not rows:
+        return {}
+    r = rows[0]
+    try:
+        r["artikelen"] = json.loads(r.get("artikelen") or "[]")
+    except Exception:
+        r["artikelen"] = []
+    return r
 
 
 def wis_order_history(winkelnaam: str = None, voor_datum: str = None):
-    sql = "DELETE FROM order_history WHERE 1=1"
-    params = []
+    q = _sb().table("order_history").delete()
     if winkelnaam:
-        sql += " AND winkelnaam = ?"
-        params.append(winkelnaam)
+        q = q.eq("winkelnaam", winkelnaam)
     if voor_datum:
-        sql += " AND datum < ?"
-        params.append(voor_datum)
-    with _conn() as c:
-        c.execute(sql, params)
+        q = q.lt("datum", voor_datum)
+    if not winkelnaam and not voor_datum:
+        # Verwijder alles — Supabase vereist een filter, gebruik neq op een veld dat altijd gevuld is
+        q = q.neq("id", 0)
+    q.execute()
 
 
 # ─── Order-status ─────────────────────────────────────────────────────────────
 def update_order_status(winkelnaam: str, status: str):
     nu = datetime.datetime.now().isoformat()
-    with _conn() as c:
-        c.execute(
-            "INSERT INTO order_status (winkelnaam, status, bijgewerkt) VALUES (?, ?, ?) "
-            "ON CONFLICT(winkelnaam) DO UPDATE SET status = excluded.status, bijgewerkt = excluded.bijgewerkt",
-            (winkelnaam, status, nu)
-        )
+    _sb().table("order_status").upsert(
+        {"winkelnaam": winkelnaam, "status": status, "bijgewerkt": nu},
+        on_conflict="winkelnaam"
+    ).execute()
 
 
 def laad_order_statussen() -> dict:
-    with _conn() as c:
-        rows = _rows(c.execute("SELECT * FROM order_status"))
-    return {r["winkelnaam"]: r for r in rows}
+    resp = _sb().table("order_status").select("*").execute()
+    return {r["winkelnaam"]: r for r in _data(resp)}
 
 
 def laad_order_status(winkelnaam: str) -> str:
-    with _conn() as c:
-        rows = _rows(c.execute(
-            "SELECT status FROM order_status WHERE winkelnaam = ?", (winkelnaam,)
-        ))
+    resp = (
+        _sb().table("order_status")
+        .select("status")
+        .eq("winkelnaam", winkelnaam)
+        .execute()
+    )
+    rows = _data(resp)
     return rows[0]["status"] if rows else "geen_bestelling"
 
 
 def laad_order_status_info(winkelnaam: str) -> dict:
-    with _conn() as c:
-        rows = _rows(c.execute(
-            "SELECT status, bijgewerkt FROM order_status WHERE winkelnaam = ?", (winkelnaam,)
-        ))
+    resp = (
+        _sb().table("order_status")
+        .select("status, bijgewerkt")
+        .eq("winkelnaam", winkelnaam)
+        .execute()
+    )
+    rows = _data(resp)
     return rows[0] if rows else {"status": "geen_bestelling", "bijgewerkt": None}
 
 
 # ─── Reset ────────────────────────────────────────────────────────────────────
 def reset_winkel_bestellingen(winkel_namen: list):
-    with _conn() as c:
-        for naam in winkel_namen:
-            c.execute("DELETE FROM store_orders WHERE store_name = ?", (naam,))
-            c.execute("DELETE FROM dbo_orders    WHERE store_name = ?", (naam,))
+    sb = _sb()
+    for naam in winkel_namen:
+        sb.table("store_orders").delete().eq("store_name", naam).execute()
+        sb.table("dbo_orders").delete().eq("store_name", naam).execute()
     for naam in winkel_namen:
         update_order_status(naam, "geen_bestelling")
 
@@ -482,26 +439,37 @@ def reset_winkel_bestellingen(winkel_namen: list):
 # ─── Order-buffer (vorige bestelling onthouden na wissen) ─────────────────────
 def sla_buffer_op(winkelnaam: str, orders: dict):
     """Sla huidige bestellaantallen op als buffer, voordat de bestelling wordt gewist."""
-    with _conn() as c:
-        c.execute("DELETE FROM order_buffer WHERE store_name = ?", (winkelnaam,))
-        rijen = [(winkelnaam, ean, qty) for ean, qty in orders.items() if qty and qty > 0]
+    try:
+        sb = _sb()
+        sb.table("order_buffer").delete().eq("store_name", winkelnaam).execute()
+        rijen = [
+            {"store_name": winkelnaam, "ean": ean, "quantity": qty}
+            for ean, qty in orders.items() if qty and qty > 0
+        ]
         if rijen:
-            c.executemany(
-                "INSERT INTO order_buffer (store_name, ean, quantity) VALUES (?, ?, ?)", rijen
-            )
+            sb.table("order_buffer").insert(rijen).execute()
+    except Exception:
+        pass  # order_buffer tabel is optioneel
 
 
 def laad_buffer(winkelnaam: str) -> dict:
     """Laad gebufferde bestelling voor een winkel (aantallen van vorige ronde)."""
-    with _conn() as c:
-        rows = _rows(c.execute(
-            "SELECT ean, quantity FROM order_buffer WHERE store_name = ? AND quantity > 0",
-            (winkelnaam,)
-        ))
-    return {r["ean"]: r["quantity"] for r in rows}
+    try:
+        resp = (
+            _sb().table("order_buffer")
+            .select("ean, quantity")
+            .eq("store_name", winkelnaam)
+            .gt("quantity", 0)
+            .execute()
+        )
+        return {r["ean"]: r["quantity"] for r in _data(resp)}
+    except Exception:
+        return {}
 
 
 def wis_buffer(winkelnaam: str):
     """Verwijder de buffer nadat de winkel een nieuwe bestelling heeft opgeslagen."""
-    with _conn() as c:
-        c.execute("DELETE FROM order_buffer WHERE store_name = ?", (winkelnaam,))
+    try:
+        _sb().table("order_buffer").delete().eq("store_name", winkelnaam).execute()
+    except Exception:
+        pass
