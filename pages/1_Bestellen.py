@@ -3,8 +3,14 @@ Lion Beddenshop — Winkelformulier
 Winkels vullen hier hun wekelijkse bestelling in.
 """
 import os
+import datetime as _dt
 import streamlit as st
 from PIL import Image
+
+# ─── Weeknummer berekenen ─────────────────────────────────────────────────────
+_vandaag    = _dt.date.today()
+_bestelweek = _vandaag.isocalendar()[1]
+_leverweek  = (_vandaag + _dt.timedelta(weeks=1)).isocalendar()[1]
 # ─── Page config met logo ─────────────────────────────────────────────────────
 _logo_path = None
 for _p in ["Lion.nl.jpg", "logo.png", "logo.jpg", "logo.jpeg"]:
@@ -134,6 +140,7 @@ with col_logo:
         st.image(_logo_path, width=72)
 with col_title:
     st.title(f"Bestelling — {winkelnaam}")
+    st.caption(f"📦 Bestelweek {_bestelweek} → Levering week {_leverweek}")
 with col_knoppen:
     st.markdown("<br>", unsafe_allow_html=True)
     if st.button("Uitloggen", use_container_width=True):
@@ -214,14 +221,25 @@ st.markdown(f"""
 # ─── Vergrendelings- en buffer-meldingen ──────────────────────────────────────
 if vergrendeld:
     st.error(
-        "🔒 **Bestelling vergrendeld** — Wouter heeft de piklijst al verwerkt. "
+        f"🔒 **Bestelling vergrendeld — week {_leverweek}** — "
+        "Wouter heeft de piklijst al verwerkt. "
         "Je kunt de aantallen niet meer wijzigen voor deze bestelronde."
     )
 elif st.session_state.get("_buffer_geladen"):
     st.info(
-        "📋 **Vorige bestelling automatisch ingeladen als startpunt.** "
-        "Dit zijn de aantallen van de vorige bestelronde. "
+        f"📦 **Nieuwe bestelronde gestart — Levering week {_leverweek}.** "
+        "Je vorige bestelling staat klaar als startpunt. "
         "Pas aan waar nodig en druk daarna op **Sla bestelling op**."
+    )
+elif _status == "geen_bestelling":
+    st.success(
+        f"🟢 **Bestelronde open — Levering week {_leverweek}.** "
+        "Vul je bestelling in en sla op wanneer je klaar bent."
+    )
+elif _status == "besteld":
+    st.success(
+        f"✅ **Bestelling week {_leverweek} is ontvangen door Wouter.** "
+        "Je kunt de aantallen nog aanpassen tot de piklijst verwerkt wordt."
     )
 
 st.markdown("---")
@@ -371,7 +389,7 @@ with tab_cart:
         st.info(f"**{totaal_cart_stuks} stuks** · **{_n_cart} artikelen** in bestelling")
 
         if vergrendeld:
-            st.error("🔒 **Bestelling vergrendeld** — Wouter heeft de piklijst al verwerkt. Aantallen zijn niet meer te wijzigen.")
+            st.error(f"🔒 **Bestelling week {_leverweek} vergrendeld** — Wouter heeft de piklijst al verwerkt. Aantallen zijn niet meer te wijzigen.")
 
         # Groepeer cart-items per sectie
         cart_secties: dict = {}
@@ -465,7 +483,7 @@ if _opslaan:
         ingevuld = sum(1 for v in nieuwe_orders.values() if v > 0) + len(nieuwe_dbo)
         st.session_state["_save_result"] = {
             "ok": True,
-            "msg": f"✅ Bestelling opgeslagen! {ingevuld} regels ingevuld.",
+            "msg": f"✅ Bestelling week {_leverweek} opgeslagen! {ingevuld} regels ingevuld.",
         }
     except Exception as fout:
         st.session_state["_save_result"] = {
