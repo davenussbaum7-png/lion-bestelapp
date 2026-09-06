@@ -28,6 +28,7 @@ from utils.database import (
     sla_definitief_op, laad_winkels_met_correcties,
     sla_order_history_op, update_order_status, laad_order_history,
     laad_order_statussen, laad_winkels, wis_order_history,
+    sla_buffer_op, laad_bestelling,
 )
 from utils.genereer import (
     bouw_artikellijst, schrijf_piklijst_pdf, schrijf_paklijst_pdf,
@@ -471,6 +472,10 @@ else:
         col_ja, col_nee = st.columns(2)
         with col_ja:
             if st.button("Ja, wis bestellingen", type="primary", use_container_width=True):
+                # Buffer opslaan zodat winkels hun vorige bestelling als startpunt zien
+                for naam in te_wissen:
+                    huidige = laad_bestelling(naam)
+                    sla_buffer_op(naam, huidige)
                 reset_winkel_bestellingen(te_wissen)
                 st.cache_data.clear()
                 for k in ["piklijsten_pdf", "paklijsten_pdf", "_te_wissen"]:
