@@ -56,7 +56,9 @@ st.markdown("## Inloggen")
 
 # ─── Login-formulier ──────────────────────────────────────────────────────────
 from utils.database import laad_winkels, controleer_pin
-from config import BEHEER_WACHTWOORD, WINKEL_WACHTWOORD_FALLBACK
+
+BEHEER_WACHTWOORD        = st.secrets["BEHEER_WACHTWOORD"]
+WINKEL_WACHTWOORD_FALLBACK = st.secrets["WINKEL_WACHTWOORD_FALLBACK"]
 
 winkels     = laad_winkels()
 winkelnamen = [w["name"] for w in winkels]
