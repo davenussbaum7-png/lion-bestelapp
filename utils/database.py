@@ -3,6 +3,8 @@ Lion Beddenshop — Lokale SQLite database.
 Alle data wordt opgeslagen in lion_app.db naast app.py.
 Geen Supabase of internetverbinding nodig voor de data.
 """
+import csv
+import io
 import json
 import os
 import sqlite3
@@ -95,12 +97,19 @@ def init_db():
             quantity   INTEGER DEFAULT 0,
             PRIMARY KEY (store_name, ean)
         );
+
+        -- Indexes voor snelle lookups op store_name / winkelnaam
+        CREATE INDEX IF NOT EXISTS idx_store_orders_store    ON store_orders(store_name);
+        CREATE INDEX IF NOT EXISTS idx_dbo_orders_store      ON dbo_orders(store_name);
+        CREATE INDEX IF NOT EXISTS idx_piklijst_corr_winkel  ON piklijst_correcties(winkelnaam);
+        CREATE INDEX IF NOT EXISTS idx_order_history_winkel  ON order_history(winkelnaam, datum);
+        CREATE INDEX IF NOT EXISTS idx_order_buffer_store    ON order_buffer(store_name);
         """)
 
 init_db()
 
 
-# ─── Winkels ─────────────────────────────────────────────────────────────────
+# ─── Winkels ──────────────────────────────────────────────────────────────────
 @st.cache_data(ttl=300)
 def laad_winkels() -> list:
     with _conn() as c:
@@ -115,10 +124,20 @@ def voeg_winkel_toe(name: str, pin: str = ""):
 
 def verwijder_winkel(name: str):
     with _conn() as c:
-        c.execute("DELETE FROM stores WHERE name = ?", (name,))
-        c.execute("DELETE FROM store_orders WHERE store_name = ?", (name,))
-        c.execute("DELETE FROM dbo_orders WHERE store_name = ?", (name,))
-        c.execute("DELETE FROM order_status WHERE winkelnaam = ?", (name,))
+        c.execute("DELETE FROM stores              WHERE name       = ?", (name,))
+        c.execute("DELETE FROM store_orders        WHERE store_name = ?", (name,))
+        c.execute("DELETE FROM dbo_orders          WHERE store_name = ?", (name,))
+        c.execute("DELETE FROM order_status        WHERE winkelnaam = ?", (name,))
+        c.execute("DELETE FROM piklijst_correcties WHERE winkelnaam = ?", (name,))
+        c.execute("DELETE FROM order_buffer        WHERE store_name = ?", (name,))
+        c.execute("DELETE FROM sap_data            WHERE store_name = ?", (name,))
+    laad_winkels.clear()
+
+
+def stel_pin_in(winkelnaam: str, pin: str):
+    """Stel een per-winkel PIN in (of wis met lege string voor fallback-wachtwoord)."""
+    with _conn() as c:
+        c.execute("UPDATE stores SET pin = ? WHERE name = ?", (pin, winkelnaam))
     laad_winkels.clear()
 
 
@@ -150,36 +169,58 @@ def update_pad_codes(pad_codes: dict):
 
 def importeer_artikelen_csv(bestandspad: str, scheidingsteken: str = ";"):
     """
-    Importeer artikelen vanuit CSV. Verwachte kolommen: ean, artikel, sectie, volgorde, pad_code
-    Geeft het aantal geimporteerde regels terug.
+    Importeer artikelen vanuit CSV-bestandspad.
+    Verwachte kolommen: ean, artikel, sectie, volgorde, pad_code
+    Geeft het aantal geïmporteerde regels terug.
     """
-    import csv
     ingevoerd = 0
     with open(bestandspad, newline="", encoding="utf-8-sig") as f:
         lezer = csv.DictReader(f, delimiter=scheidingsteken)
-        with _conn() as c:
-            for rij in lezer:
-                ean = (rij.get("ean") or rij.get("EAN") or "").strip()
-                if not ean:
-                    continue
-                vol = rij.get("volgorde", "").strip()
-                c.execute("""
-                    INSERT INTO articles (ean, artikel, sectie, volgorde, pad_code)
-                    VALUES (?, ?, ?, ?, ?)
-                    ON CONFLICT(ean) DO UPDATE SET
-                        artikel  = excluded.artikel,
-                        sectie   = excluded.sectie,
-                        volgorde = excluded.volgorde,
-                        pad_code = excluded.pad_code
-                """, (
-                    ean,
-                    (rij.get("artikel") or rij.get("Artikel") or "").strip(),
-                    (rij.get("sectie")  or rij.get("Sectie")  or "").strip(),
-                    int(vol) if vol.isdigit() else 9999,
-                    (rij.get("pad_code") or rij.get("Pad") or "").strip(),
-                ))
-                ingevoerd += 1
+        ingevoerd = _importeer_artikelen_rows(lezer)
     laad_artikelen.clear()
+    return ingevoerd
+
+
+def importeer_artikelen_bytes(bestand_bytes: bytes, scheidingsteken: str = ";") -> int:
+    """
+    Importeer artikelen vanuit geüploade CSV-bytes (voor Streamlit file_uploader).
+    Probeert UTF-8 met BOM, daarna latin-1 als fallback.
+    """
+    try:
+        tekst = bestand_bytes.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        tekst = bestand_bytes.decode("latin-1")
+    lezer = csv.DictReader(io.StringIO(tekst), delimiter=scheidingsteken)
+    ingevoerd = _importeer_artikelen_rows(lezer)
+    laad_artikelen.clear()
+    return ingevoerd
+
+
+def _importeer_artikelen_rows(lezer) -> int:
+    """Gemeenschappelijke logica voor CSV-import vanuit een DictReader."""
+    ingevoerd = 0
+    with _conn() as c:
+        for rij in lezer:
+            ean = (rij.get("ean") or rij.get("EAN") or "").strip()
+            if not ean:
+                continue
+            vol = (rij.get("volgorde") or "").strip()
+            c.execute("""
+                INSERT INTO articles (ean, artikel, sectie, volgorde, pad_code)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(ean) DO UPDATE SET
+                    artikel  = excluded.artikel,
+                    sectie   = excluded.sectie,
+                    volgorde = excluded.volgorde,
+                    pad_code = excluded.pad_code
+            """, (
+                ean,
+                (rij.get("artikel") or rij.get("Artikel") or "").strip(),
+                (rij.get("sectie")  or rij.get("Sectie")  or "").strip(),
+                int(vol) if vol.isdigit() else 9999,
+                (rij.get("pad_code") or rij.get("Pad") or "").strip(),
+            ))
+            ingevoerd += 1
     return ingevoerd
 
 
@@ -382,19 +423,6 @@ def laad_order_history(winkelnaam: str = None, limit: int = 100) -> list:
         return _rows(c.execute(sql, params))
 
 
-def laad_history_detail(history_id: int) -> dict:
-    with _conn() as c:
-        rows = _rows(c.execute("SELECT * FROM order_history WHERE id = ?", (history_id,)))
-    if not rows:
-        return {}
-    r = rows[0]
-    try:
-        r["artikelen"] = json.loads(r.get("artikelen") or "[]")
-    except Exception:
-        r["artikelen"] = []
-    return r
-
-
 def wis_order_history(winkelnaam: str = None, voor_datum: str = None):
     sql = "DELETE FROM order_history WHERE 1=1"
     params = []
@@ -442,22 +470,16 @@ def laad_order_status_info(winkelnaam: str) -> dict:
 
 
 # ─── Reset ────────────────────────────────────────────────────────────────────
-def reset_alle_bestellingen():
-    with _conn() as c:
-        c.execute("DELETE FROM store_orders")
-        c.execute("DELETE FROM dbo_orders")
-
-
 def reset_winkel_bestellingen(winkel_namen: list):
     with _conn() as c:
         for naam in winkel_namen:
             c.execute("DELETE FROM store_orders WHERE store_name = ?", (naam,))
-            c.execute("DELETE FROM dbo_orders WHERE store_name = ?", (naam,))
+            c.execute("DELETE FROM dbo_orders    WHERE store_name = ?", (naam,))
     for naam in winkel_namen:
         update_order_status(naam, "geen_bestelling")
 
 
-# ─── Order-buffer (vorige bestelling onthouden na wissen) ────────────────────
+# ─── Order-buffer (vorige bestelling onthouden na wissen) ─────────────────────
 def sla_buffer_op(winkelnaam: str, orders: dict):
     """Sla huidige bestellaantallen op als buffer, voordat de bestelling wordt gewist."""
     with _conn() as c:
