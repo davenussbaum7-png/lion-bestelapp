@@ -24,12 +24,11 @@ if st.session_state.get("rol") != "beheerder":
 from utils.database import (
     laad_artikelen, laad_alle_bestellingen, laad_alle_dbo_bestellingen,
     laad_alle_sap, sla_sap_op, bestelling_status,
-    reset_winkel_bestellingen, update_pad_codes,
+    reset_en_laad_buffer, update_pad_codes,
     sla_piklijst_correcties_op, laad_piklijst_correcties,
     sla_definitief_op, laad_winkels_met_correcties,
     sla_order_history_op, update_order_status, laad_order_history,
     laad_order_statussen, laad_winkels, wis_order_history,
-    sla_buffer_op, laad_bestelling,
     voeg_winkel_toe, verwijder_winkel, stel_pin_in,
     importeer_artikelen_bytes,
 )
@@ -504,10 +503,7 @@ else:
         col_ja, col_nee = st.columns(2)
         with col_ja:
             if st.button("Ja, wis bestellingen", type="primary", use_container_width=True):
-                for naam in te_wissen:
-                    huidige = laad_bestelling(naam)
-                    sla_buffer_op(naam, huidige)
-                reset_winkel_bestellingen(te_wissen)
+                reset_en_laad_buffer(te_wissen)
                 st.cache_data.clear()
                 for k in ["piklijsten_pdf", "paklijsten_pdf", "_te_wissen"]:
                     st.session_state.pop(k, None)
