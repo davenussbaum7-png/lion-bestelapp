@@ -11,6 +11,7 @@ from PIL import Image
 _vandaag    = _dt.date.today()
 _bestelweek = _vandaag.isocalendar()[1]
 _leverweek  = (_vandaag + _dt.timedelta(weeks=1)).isocalendar()[1]
+
 # ─── Page config met logo ─────────────────────────────────────────────────────
 _logo_path = None
 for _p in ["Lion.nl.jpg", "logo.png", "logo.jpg", "logo.jpeg"]:
@@ -26,6 +27,7 @@ st.set_page_config(
     page_icon=_page_icon,
     layout="wide",
 )
+
 # ─── Toegangscontrole ─────────────────────────────────────────────────────────
 if st.session_state.get("rol") != "winkel":
     st.warning("Je bent niet ingelogd. Ga terug naar de hoofdpagina.")
@@ -38,8 +40,9 @@ winkelnaam = st.session_state.ingelogd_als
 from utils.database import (
     laad_artikelen, laad_bestelling, laad_dbo_bestelling,
     sla_bestelling_op, sla_dbo_op, laad_order_status_info,
-    laad_buffer, wis_buffer,
+    laad_buffer, wis_buffer, sla_buffer_op,
 )
+
 # ─── Stijl ────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
@@ -87,23 +90,38 @@ footer { display: none !important; }
 artikelen_db   = laad_artikelen()
 dbo_opgeslagen = laad_dbo_bestelling(winkelnaam)
 
+# ─── Status EERST laden (vóór session state init) ─────────────────────────────
+_status_info = laad_order_status_info(winkelnaam)
+_status      = _status_info.get("status", "geen_bestelling")
+_bijgewerkt  = _status_info.get("bijgewerkt")
+vergrendeld  = _status in ("piklijst_klaar", "pakket_onderweg")
+
 # ─── Session state initialiseren (eenmalig vanuit DB bij eerste laad) ─────────
 if f"_geladen_{winkelnaam}" not in st.session_state:
-    opgeslagen = laad_bestelling(winkelnaam)
-    for art in artikelen_db:
-        ean = art["ean"]
-        st.session_state[f"art_{ean}"] = opgeslagen.get(ean, 0) or 0
-
-    # Buffer check: als er geen lopende bestelling is maar wel een buffer, laden we die in
-    heeft_lopende = any(st.session_state.get(f"art_{a['ean']}", 0) > 0 for a in artikelen_db)
-    if not heeft_lopende:
+    if vergrendeld:
+        # Vergrendeld: laad buffer (pre-orders voor de volgende ronde)
         buffer = laad_buffer(winkelnaam)
+        for art in artikelen_db:
+            ean = art["ean"]
+            st.session_state[f"art_{ean}"] = buffer.get(ean, 0) or 0
         if buffer:
-            for art in artikelen_db:
-                ean = art["ean"]
-                if ean in buffer and buffer[ean] > 0:
-                    st.session_state[f"art_{ean}"] = buffer[ean]
-            st.session_state["_buffer_geladen"] = True
+            st.session_state["_buffer_actief"] = True
+    else:
+        # Niet vergrendeld: laad huidige actieve bestelling
+        opgeslagen = laad_bestelling(winkelnaam)
+        for art in artikelen_db:
+            ean = art["ean"]
+            st.session_state[f"art_{ean}"] = opgeslagen.get(ean, 0) or 0
+        # Buffer check: als er geen lopende bestelling is maar wel een buffer (na reset)
+        heeft_lopende = any(st.session_state.get(f"art_{a['ean']}", 0) > 0 for a in artikelen_db)
+        if not heeft_lopende:
+            buffer = laad_buffer(winkelnaam)
+            if buffer:
+                for art in artikelen_db:
+                    ean = art["ean"]
+                    if ean in buffer and buffer[ean] > 0:
+                        st.session_state[f"art_{ean}"] = buffer[ean]
+                st.session_state["_buffer_geladen"] = True
 
     # DBO initialiseren
     dbo_secties_init = ["01 1 PERS.DBO", "02 2 PERS.DBO", "03 3 Pers.DBO", "04 260 BR.DBO", "05 Diversen"]
@@ -121,17 +139,12 @@ if f"_geladen_{winkelnaam}" not in st.session_state:
                 st.session_state[f"dbo_qty_{sectie_dbo}_{i}"] = b.get("quantity", 0) or 0
     st.session_state[f"_geladen_{winkelnaam}"] = True
 
-# ─── Status en vergrendeling ──────────────────────────────────────────────────
-_status_info = laad_order_status_info(winkelnaam)
-_status      = _status_info.get("status", "geen_bestelling")
-_bijgewerkt  = _status_info.get("bijgewerkt")
-
-# Bestelling vergrendeld als piklijst al verwerkt is
-vergrendeld = _status in ("piklijst_klaar", "pakket_onderweg")
-
 # ─── Cart items berekenen ─────────────────────────────────────────────────────
 _cart_eans = {a["ean"] for a in artikelen_db if st.session_state.get(f"art_{a['ean']}", 0) > 0}
 _n_cart    = len(_cart_eans)
+
+# ─── Save-knop label ─────────────────────────────────────────────────────────
+_opslaan_label = "💾  Alvast bestellen — volgende ronde" if vergrendeld else "💾  Sla bestelling op"
 
 # ─── Header ───────────────────────────────────────────────────────────────────
 col_logo, col_title, col_knoppen = st.columns([1, 5, 2])
@@ -147,16 +160,12 @@ with col_knoppen:
         st.session_state.rol = None
         st.session_state.ingelogd_als = None
         st.switch_page("app.py")
-    if not vergrendeld:
-        opslaan = st.button(
-            "💾  Sla bestelling op",
-            type="primary",
-            use_container_width=True,
-            key="opslaan_header",
-        )
-    else:
-        opslaan = False
-        st.button("🔒  Bestelling vergrendeld", use_container_width=True, disabled=True, key="opslaan_header")
+    opslaan = st.button(
+        _opslaan_label,
+        type="primary",
+        use_container_width=True,
+        key="opslaan_header",
+    )
 
 # ─── Feedback van vorige opslag tonen ────────────────────────────────────────
 if "_save_result" in st.session_state:
@@ -218,13 +227,20 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# ─── Vergrendelings- en buffer-meldingen ──────────────────────────────────────
+# ─── Meldingen ────────────────────────────────────────────────────────────────
 if vergrendeld:
-    st.error(
-        f"🔒 **Bestelling vergrendeld — week {_leverweek}** — "
-        "Wouter heeft de piklijst al verwerkt. "
-        "Je kunt de aantallen niet meer wijzigen voor deze bestelronde."
-    )
+    if st.session_state.get("_buffer_actief"):
+        st.info(
+            f"📦 **Volgende ronde — je bestelling staat al klaar.** "
+            "Pas aan waar nodig en sla opnieuw op. "
+            "Wouter laadt dit automatisch in zodra hij de nieuwe ronde start."
+        )
+    else:
+        st.info(
+            f"📦 **Bestelling week {_bestelweek} is verwerkt door Wouter.** "
+            "Je kunt alvast je bestelling voor de **volgende ronde** klaarzetten. "
+            "Wouter laadt dit automatisch in zodra hij de nieuwe ronde start."
+        )
 elif st.session_state.get("_buffer_geladen"):
     st.info(
         f"📦 **Nieuwe bestelronde gestart — Levering week {_leverweek}.** "
@@ -252,7 +268,10 @@ tab_alle, tab_cart = st.tabs(["📝 Alle artikelen", _tab_cart_label])
 # TAB 1 — Alle artikelen
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_alle:
-    st.markdown("Vul de aantallen in die je wilt bestellen. Artikelen die al in je bestelling staan zie je in **Mijn bestelling**.")
+    if vergrendeld:
+        st.markdown("Zet alvast je bestelling klaar voor de **volgende ronde**. Artikelen die al in je bestelling staan zie je in **Mijn bestelling**.")
+    else:
+        st.markdown("Vul de aantallen in die je wilt bestellen. Artikelen die al in je bestelling staan zie je in **Mijn bestelling**.")
 
     # Zoekbalk
     zoekterm = st.text_input("🔍 Zoek op artikelnaam, sectie of EAN",
@@ -282,7 +301,6 @@ with tab_alle:
     if _n_cart > 0:
         st.info(f"**{totaal_ingevuld} stuks** ingevuld · **{_n_cart} artikelen** in bestelling")
 
-    # Artikelen per sectie
     if zoekterm.strip() and not gefilterd:
         st.warning(f"Geen artikelen gevonden voor **'{zoekterm.strip()}'**. Controleer de spelling of probeer een andere zoekterm.")
 
@@ -292,7 +310,6 @@ with tab_alle:
         secties.setdefault(s, []).append(art)
 
     for sectie, artikelen_sectie in secties.items():
-        # Tel hoeveel al in bestelling staan
         in_cart = sum(1 for a in artikelen_sectie if a["ean"] in _cart_eans)
         sectie_label = f"📦 {sectie} ({len(artikelen_sectie)} artikelen)"
         if in_cart > 0:
@@ -307,14 +324,12 @@ with tab_alle:
                     st.markdown(f"<p class='art-label'>{label}</p>", unsafe_allow_html=True)
 
                 if ean in _cart_eans:
-                    # Al in bestelling → toon badge (input staat in cart tab om key-conflict te voorkomen)
                     qty = st.session_state.get(f"art_{ean}", 0)
                     col_num.markdown(
                         f"<div class='cart-badge'>✓ {qty}</div>",
                         unsafe_allow_html=True,
                     )
                 else:
-                    # Nog niet besteld → toon bewerkbaar inputveld
                     col_num.number_input(
                         label=f"_{ean}",
                         min_value=0,
@@ -322,7 +337,6 @@ with tab_alle:
                         step=1,
                         label_visibility="collapsed",
                         key=f"art_{ean}",
-                        disabled=vergrendeld,
                     )
 
     st.markdown("---")
@@ -334,7 +348,10 @@ with tab_alle:
         dbo_bestaand.setdefault(r["sectie"], []).append(r)
 
     st.subheader("DBO — Vrije invoer")
-    st.caption("Artikelen die niet in de lijst staan. Typ de naam en het aantal.")
+    if vergrendeld:
+        st.caption("DBO-bestellingen kun je invullen zodra Wouter de nieuwe ronde start.")
+    else:
+        st.caption("Artikelen die niet in de lijst staan. Typ de naam en het aantal.")
 
     for sectie_dbo in dbo_secties:
         with st.expander(f"📝 {sectie_dbo}", expanded=False):
@@ -362,36 +379,32 @@ with tab_alle:
 
     st.markdown("---")
 
-    # Onderste opslaanknop
-    if not vergrendeld:
-        opslaan_footer = st.button(
-            "💾  Sla bestelling op",
-            type="primary",
-            use_container_width=True,
-            key="opslaan_footer",
-        )
-    else:
-        opslaan_footer = False
-        st.button("🔒  Bestelling vergrendeld — niet meer te wijzigen",
-                  use_container_width=True, disabled=True, key="opslaan_footer")
+    opslaan_footer = st.button(
+        _opslaan_label,
+        type="primary",
+        use_container_width=True,
+        key="opslaan_footer",
+    )
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 2 — Mijn bestelling (cart)
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_cart:
     if not _cart_eans:
-        st.info("🛒 Je hebt nog geen artikelen in je bestelling. Ga naar **Alle artikelen** om artikelen toe te voegen.")
+        if vergrendeld:
+            st.info("🛒 Nog niets klaargezet voor de volgende ronde. Ga naar **Alle artikelen** om te bestellen.")
+        else:
+            st.info("🛒 Je hebt nog geen artikelen in je bestelling. Ga naar **Alle artikelen** om artikelen toe te voegen.")
     else:
         totaal_cart_stuks = sum(
             st.session_state.get(f"art_{a['ean']}", 0)
             for a in artikelen_db if a["ean"] in _cart_eans
         )
-        st.info(f"**{totaal_cart_stuks} stuks** · **{_n_cart} artikelen** in bestelling")
-
         if vergrendeld:
-            st.error(f"🔒 **Bestelling week {_leverweek} vergrendeld** — Wouter heeft de piklijst al verwerkt. Aantallen zijn niet meer te wijzigen.")
+            st.info(f"**{totaal_cart_stuks} stuks** · **{_n_cart} artikelen** klaargezet voor de volgende ronde")
+        else:
+            st.info(f"**{totaal_cart_stuks} stuks** · **{_n_cart} artikelen** in bestelling")
 
-        # Groepeer cart-items per sectie
         cart_secties: dict = {}
         for art in artikelen_db:
             if art["ean"] in _cart_eans:
@@ -405,7 +418,6 @@ with tab_cart:
                 with col1:
                     st.markdown(f"<p class='art-label'>{art['artikel']}</p>", unsafe_allow_html=True)
                 with col2:
-                    # Zelfde key als main tab — geen conflict want dit ean heeft GEEN input in tab 1
                     st.number_input(
                         label=f"_{ean}_cart",
                         min_value=0,
@@ -413,41 +425,32 @@ with tab_cart:
                         step=1,
                         label_visibility="collapsed",
                         key=f"art_{ean}",
-                        disabled=vergrendeld,
                     )
             st.markdown("")
 
-        # DBO samenvatting (read-only)
-        dbo_gevuld = [
-            r for r in dbo_opgeslagen
-            if r.get("quantity", 0) > 0 and r.get("artikel", "").strip()
-        ]
-        if dbo_gevuld:
-            st.markdown("---")
-            st.markdown("<div class='sectie-header'>DBO — Vrije invoer</div>", unsafe_allow_html=True)
-            for r in dbo_gevuld:
-                st.markdown(f"- **{r['artikel']}** ({r['sectie']}): {r['quantity']} st")
-            st.caption("Aanpassen? Open 'Alle artikelen' → DBO-sectie hieronder.")
+        # DBO samenvatting — alleen tonen als niet vergrendeld
+        if not vergrendeld:
+            dbo_gevuld = [
+                r for r in dbo_opgeslagen
+                if r.get("quantity", 0) > 0 and r.get("artikel", "").strip()
+            ]
+            if dbo_gevuld:
+                st.markdown("---")
+                st.markdown("<div class='sectie-header'>DBO — Vrije invoer</div>", unsafe_allow_html=True)
+                for r in dbo_gevuld:
+                    st.markdown(f"- **{r['artikel']}** ({r['sectie']}): {r['quantity']} st")
+                st.caption("Aanpassen? Open 'Alle artikelen' → DBO-sectie hieronder.")
 
         st.markdown("---")
-        if not vergrendeld:
-            opslaan_cart = st.button(
-                "💾  Sla bestelling op",
-                type="primary",
-                use_container_width=True,
-                key="opslaan_cart",
-            )
-        else:
-            opslaan_cart = False
-            st.button("🔒  Bestelling vergrendeld", use_container_width=True, disabled=True, key="opslaan_cart")
+        opslaan_cart = st.button(
+            _opslaan_label,
+            type="primary",
+            use_container_width=True,
+            key="opslaan_cart",
+        )
 
 # ─── Opslaan afhandelen ───────────────────────────────────────────────────────
-# Vang alle opslaanknoppen op (header, footer tab1, cart tab2)
-_opslaan = (not vergrendeld) and (
-    opslaan
-    or opslaan_footer
-    or st.session_state.get("opslaan_cart", False)
-)
+_opslaan = opslaan or opslaan_footer or st.session_state.get("opslaan_cart", False)
 
 if _opslaan:
     dbo_secties = ["01 1 PERS.DBO", "02 2 PERS.DBO", "03 3 Pers.DBO", "04 260 BR.DBO", "05 Diversen"]
@@ -461,30 +464,41 @@ if _opslaan:
         nieuwe_orders[ean] = st.session_state.get(f"art_{ean}", 0)
 
     nieuwe_dbo = []
-    for sectie_dbo in dbo_secties:
-        bestaande_regels = dbo_bestaand.get(sectie_dbo, [])
-        n_rijen = max(10, len(bestaande_regels) + 2)
-        for i in range(n_rijen):
-            art_val = st.session_state.get(f"dbo_art_{sectie_dbo}_{i}", "")
-            qty_val = st.session_state.get(f"dbo_qty_{sectie_dbo}_{i}", 0)
-            if art_val.strip() and qty_val > 0:
-                nieuwe_dbo.append({
-                    "sectie":   sectie_dbo,
-                    "artikel":  art_val.strip(),
-                    "quantity": qty_val,
-                })
-    try:
-        # Buffer wissen — winkel heeft nu een nieuwe bestelling ingediend
-        wis_buffer(winkelnaam)
-        st.session_state.pop("_buffer_geladen", None)
+    if not vergrendeld:
+        for sectie_dbo in dbo_secties:
+            bestaande_regels = dbo_bestaand.get(sectie_dbo, [])
+            n_rijen = max(10, len(bestaande_regels) + 2)
+            for i in range(n_rijen):
+                art_val = st.session_state.get(f"dbo_art_{sectie_dbo}_{i}", "")
+                qty_val = st.session_state.get(f"dbo_qty_{sectie_dbo}_{i}", 0)
+                if art_val.strip() and qty_val > 0:
+                    nieuwe_dbo.append({
+                        "sectie":   sectie_dbo,
+                        "artikel":  art_val.strip(),
+                        "quantity": qty_val,
+                    })
 
-        sla_bestelling_op(winkelnaam, nieuwe_orders)
-        sla_dbo_op(winkelnaam, nieuwe_dbo)
-        ingevuld = sum(1 for v in nieuwe_orders.values() if v > 0) + len(nieuwe_dbo)
-        st.session_state["_save_result"] = {
-            "ok": True,
-            "msg": f"✅ Bestelling week {_leverweek} opgeslagen! {ingevuld} regels ingevuld.",
-        }
+    try:
+        if vergrendeld:
+            # Sla op in buffer voor de volgende ronde
+            sla_buffer_op(winkelnaam, nieuwe_orders)
+            st.session_state["_buffer_actief"] = True
+            ingevuld = sum(1 for v in nieuwe_orders.values() if v > 0)
+            st.session_state["_save_result"] = {
+                "ok": True,
+                "msg": f"✅ Bestelling klaargezet voor de volgende ronde! {ingevuld} artikelen. Wouter laadt dit automatisch in.",
+            }
+        else:
+            # Normale opslag als actieve bestelling
+            wis_buffer(winkelnaam)
+            st.session_state.pop("_buffer_geladen", None)
+            sla_bestelling_op(winkelnaam, nieuwe_orders)
+            sla_dbo_op(winkelnaam, nieuwe_dbo)
+            ingevuld = sum(1 for v in nieuwe_orders.values() if v > 0) + len(nieuwe_dbo)
+            st.session_state["_save_result"] = {
+                "ok": True,
+                "msg": f"✅ Bestelling week {_leverweek} opgeslagen! {ingevuld} regels ingevuld.",
+            }
     except Exception as fout:
         st.session_state["_save_result"] = {
             "ok": False,
