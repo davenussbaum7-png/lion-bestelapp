@@ -436,6 +436,31 @@ def reset_winkel_bestellingen(winkel_namen: list):
         update_order_status(naam, "geen_bestelling")
 
 
+# ─── Reset + buffer automatisch laden ────────────────────────────────────────
+def reset_en_laad_buffer(winkel_namen: list):
+    """
+    Reset bestellingen en laad buffer automatisch als nieuwe actieve bestelling.
+    - Als er een buffer is → zet die als actieve bestelling (status: besteld)
+    - Als er geen buffer is → zet status op geen_bestelling
+    """
+    sb = _sb()
+    for naam in winkel_namen:
+        buffer = laad_buffer(naam)
+        sb.table("store_orders").delete().eq("store_name", naam).execute()
+        sb.table("dbo_orders").delete().eq("store_name", naam).execute()
+        if buffer:
+            rijen = [
+                {"store_name": naam, "ean": ean, "quantity": qty}
+                for ean, qty in buffer.items() if qty and qty > 0
+            ]
+            if rijen:
+                sb.table("store_orders").insert(rijen).execute()
+            sb.table("order_buffer").delete().eq("store_name", naam).execute()
+            update_order_status(naam, "besteld")
+        else:
+            update_order_status(naam, "geen_bestelling")
+
+
 # ─── Order-buffer (vorige bestelling onthouden na wissen) ─────────────────────
 def sla_buffer_op(winkelnaam: str, orders: dict):
     """Sla huidige bestellaantallen op als buffer, voordat de bestelling wordt gewist."""
