@@ -3,6 +3,7 @@ Lion Beddenshop — Winkelformulier
 Winkels vullen hier hun wekelijkse bestelling in.
 """
 import os
+import re as _re
 import datetime as _dt
 import streamlit as st
 from PIL import Image
@@ -85,6 +86,15 @@ footer { display: none !important; }
 }
 </style>
 """, unsafe_allow_html=True)
+
+# ─── Natural sort voor sectienamen ────────────────────────────────────────────
+def _sectie_sort_key(naam: str):
+    """
+    Natural sort: splitst tekst en getallen zodat bijv.
+    '6 CM' < '8 CM' < '10 CM' in plaats van alfabetisch '10' < '6' < '8'.
+    """
+    delen = _re.split(r'(\d+)', (naam or "").upper())
+    return [int(d) if d.isdigit() else d for d in delen]
 
 # ─── Data laden ───────────────────────────────────────────────────────────────
 artikelen_db   = laad_artikelen()
@@ -309,7 +319,8 @@ with tab_alle:
         s = art.get("sectie") or "Overig"
         secties.setdefault(s, []).append(art)
 
-    for sectie, artikelen_sectie in secties.items():
+    # Natural sort: getallen in sectienamen numerisch vergelijken (6 CM < 8 CM < 10 CM)
+    for sectie, artikelen_sectie in sorted(secties.items(), key=lambda x: _sectie_sort_key(x[0])):
         in_cart = sum(1 for a in artikelen_sectie if a["ean"] in _cart_eans)
         sectie_label = f"📦 {sectie} ({len(artikelen_sectie)} artikelen)"
         if in_cart > 0:
@@ -410,7 +421,8 @@ with tab_cart:
             if art["ean"] in _cart_eans:
                 cart_secties.setdefault(art.get("sectie") or "Overig", []).append(art)
 
-        for sectie, items in cart_secties.items():
+        # Natural sort ook in cart-tab
+        for sectie, items in sorted(cart_secties.items(), key=lambda x: _sectie_sort_key(x[0])):
             st.markdown(f"<div class='sectie-header'>{sectie}</div>", unsafe_allow_html=True)
             for art in items:
                 ean = art["ean"]
