@@ -279,6 +279,124 @@ with tab1:
 # TAB 2 — WIJZIGEN
 # ════════════════════════════════════════════════════════════════════════════
 with tab2:
+    # ── Export ───────────────────────────────────────────────────────────────
+    import io as _io
+    st.markdown("### 📥 Exporteer artikelen als Excel")
+    st.caption(
+        "Download alle artikelen met hun huidige padnummer. "
+        "Vul de kolom **Pad** in, sla op en laad het bestand hieronder terug."
+    )
+    df_export = pd.DataFrame([
+        {
+            "EAN":     a.get("ean", ""),
+            "Artikel": a.get("artikel", ""),
+            "Sectie":  a.get("sectie", ""),
+            "Pad":     a.get("pad_code", "") or "",
+        }
+        for a in sorted(
+            artikelen,
+            key=lambda x: (
+                (x.get("sectie") or "").upper(),
+                (x.get("artikel") or "").upper(),
+            ),
+        )
+    ])
+    _buf = _io.BytesIO()
+    with pd.ExcelWriter(_buf, engine="openpyxl") as _writer:
+        df_export.to_excel(_writer, index=False, sheet_name="Artikelen")
+    _buf.seek(0)
+    st.download_button(
+        label=f"⬇️  Download Excel  ({len(artikelen)} artikelen)",
+        data=_buf.getvalue(),
+        file_name="lion_artikelen_padnummers.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        type="primary",
+        use_container_width=True,
+        key="dl_export_excel",
+    )
+
+    st.divider()
+
+    # ── Import ────────────────────────────────────────────────────────────────
+    st.markdown("### 📤 Importeer ingevulde padnummers")
+    st.caption(
+        "Upload het bewerkte Excel-bestand. "
+        "Alleen de kolom **Pad** wordt bijgewerkt op basis van de EAN-code. "
+        "Rijen met een lege Pad-kolom worden overgeslagen."
+    )
+    upload_pad = st.file_uploader(
+        "Selecteer Excel-bestand (.xlsx)",
+        type=["xlsx"],
+        key="pad_upload",
+    )
+    if upload_pad:
+        try:
+            df_imp = pd.read_excel(upload_pad, dtype=str).fillna("")
+            vereist = {"EAN", "Pad"}
+            if not vereist.issubset(set(df_imp.columns)):
+                st.error(f"Het bestand moet minimaal de kolommen {vereist} bevatten.")
+            else:
+                te_verwerken = df_imp[
+                    df_imp["EAN"].str.strip().ne("") & df_imp["Pad"].str.strip().ne("")
+                ].copy()
+                overgeslagen_n = len(df_imp) - len(te_verwerken)
+                st.caption(
+                    f"**{len(te_verwerken)}** rijen worden bijgewerkt  ·  "
+                    f"{overgeslagen_n} rijen overgeslagen (leeg EAN of Pad)."
+                )
+                st.dataframe(
+                    te_verwerken[["EAN", "Artikel", "Sectie", "Pad"]].head(10)
+                    if "Artikel" in te_verwerken.columns
+                    else te_verwerken[["EAN", "Pad"]].head(10),
+                    hide_index=True,
+                    use_container_width=True,
+                )
+                if st.button(
+                    f"⬆️  Importeer padnummers ({len(te_verwerken)} rijen)",
+                    type="primary",
+                    use_container_width=True,
+                    key="btn_import_pad",
+                ):
+                    from collections import defaultdict as _dd
+                    pad_groepen: dict = _dd(list)
+                    for _, rij in te_verwerken.iterrows():
+                        pad_groepen[rij["Pad"].strip()].append(rij["EAN"].strip())
+
+                    bijgewerkt = fouten_imp = 0
+                    prog = st.progress(0, text="Importeren...")
+                    totaal = len(pad_groepen)
+                    for idx, (pad_val, eans) in enumerate(pad_groepen.items()):
+                        # Batch per unieke padwaarde → één PATCH-request per pad
+                        ean_lijst = ",".join(eans)
+                        resp = patch_artikelen(
+                            f"ean=in.({ean_lijst})",
+                            {"pad_code": pad_val},
+                        )
+                        if resp.status_code in (200, 204):
+                            bijgewerkt += len(eans)
+                        else:
+                            fouten_imp += len(eans)
+                            st.warning(f"Fout pad '{pad_val}': {resp.text[:150]}")
+                        prog.progress((idx + 1) / totaal)
+                    prog.empty()
+                    if fouten_imp == 0:
+                        st.success(
+                            f"✅  {bijgewerkt} artikel(en) bijgewerkt  ·  "
+                            f"{overgeslagen_n} rijen overgeslagen."
+                        )
+                    else:
+                        st.warning(
+                            f"{bijgewerkt} bijgewerkt  |  {fouten_imp} mislukt  |  "
+                            f"{overgeslagen_n} overgeslagen."
+                        )
+                    st.cache_data.clear()
+                    st.rerun()
+        except Exception as e:
+            st.error(f"Kan bestand niet lezen: {e}")
+
+    st.divider()
+
+    # ── Handmatig wijzigen ────────────────────────────────────────────────────
     st.markdown("### Padnummer wijzigen voor een volledige sectie")
     wijk_sectie = st.selectbox("Sectie", sorted(secties_dict.keys()), key="wijk_sectie")
     if wijk_sectie:
