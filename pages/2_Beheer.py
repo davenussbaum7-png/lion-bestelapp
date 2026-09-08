@@ -1,7 +1,7 @@
 """
 Lion Beddenshop — Beheerpagina (Wouter)
 SAP uploaden, piklijsten genereren (PDF), correcties invoeren, paklijsten genereren (PDF),
-reset, historiek, artikelen importeren, winkelbeheer.
+reset, historiek, winkelbeheer.
 """
 import io
 import re as _re
@@ -30,7 +30,6 @@ from utils.database import (
     sla_order_history_op, update_order_status, laad_order_history,
     laad_order_statussen, laad_winkels, wis_order_history,
     voeg_winkel_toe, verwijder_winkel, stel_pin_in,
-    importeer_artikelen_bytes,
 )
 from utils.genereer import (
     bouw_artikellijst, schrijf_piklijst_pdf, schrijf_paklijst_pdf,
@@ -155,48 +154,6 @@ if padcode_bestand:
             bijgewerkt = update_pad_codes(pad_codes)
             st.success(f"✅ {bijgewerkt} artikelen bijgewerkt met padcodes.")
             st.info("De artikelcache is geleegd — nieuwe piklijsten gebruiken meteen de nieuwe padcodes.")
-st.markdown("---")
-
-# ─── Artikelen importeren (CSV) ───────────────────────────────────────────────
-st.subheader("📂 Artikelen importeren (CSV)")
-st.caption(
-    "Upload een CSV-bestand om de artikelencatalogus bij te werken. "
-    "Bestaande EAN's worden overschreven, nieuwe worden toegevoegd."
-)
-with st.expander("📋 Vereist CSV-formaat", expanded=False):
-    st.markdown("""
-Kolommen (scheidingsteken `;` of `,`):
-
-| ean | artikel | sectie | volgorde | pad_code |
-|-----|---------|--------|----------|----------|
-| 121201532 | Jersey hoeslaken 90x200 | Jersey | 10 | A1 |
-| 121201534 | Jersey hoeslaken 140x200 | Jersey | 20 | A1 |
-
-Kolomnamen zijn hoofdletterongevoelig. `volgorde` en `pad_code` zijn optioneel.
-""")
-
-csv_bestand = st.file_uploader(
-    "Selecteer artikelen-CSV (.csv)",
-    type=["csv"],
-    key="csv_upload",
-)
-if csv_bestand:
-    col_sep1, col_sep2 = st.columns([2, 3])
-    with col_sep1:
-        scheidingsteken = st.selectbox(
-            "Scheidingsteken:",
-            options=[";", ","],
-            key="csv_scheidingsteken",
-        )
-    with col_sep2:
-        st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("📂 Importeer artikelen", type="primary"):
-            try:
-                n = importeer_artikelen_bytes(csv_bestand.read(), scheidingsteken)
-                st.success(f"✅ {n} artikelen geïmporteerd / bijgewerkt.")
-                st.info("Artikelcache geleegd — de wijzigingen zijn meteen actief.")
-            except Exception as fout:
-                st.error(f"❌ Fout bij importeren: {fout}")
 st.markdown("---")
 
 # ─── Stap 1 — Piklijsten genereren (PDF) ─────────────────────────────────────
