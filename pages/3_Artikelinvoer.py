@@ -187,10 +187,11 @@ with tab1:
         controleer = st.button("🔍  Controleer & preview", type="primary", use_container_width=True)
     with col_wis:
         if st.button("🗑  Wis", use_container_width=True):
-            st.session_state["inv_plak"] = ""
-            if "preview_data" in st.session_state:
-                del st.session_state["preview_data"]
-                del st.session_state["te_invoegen_data"]
+            # FIX: del in plaats van = "" — widget is al gerenderd, directe assignment gooit
+            # StreamlitWidgetAlreadyInstantiatedError. Del reset de waarde voor de volgende run.
+            st.session_state.pop("inv_plak", None)
+            st.session_state.pop("preview_data", None)
+            st.session_state.pop("te_invoegen_data", None)
             st.rerun()
 
     if controleer:
