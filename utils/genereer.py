@@ -364,8 +364,8 @@ def schrijf_paklijst_pdf(winkelnaam, correcties, datum=None):
                   textColor=colors.HexColor("#CCCCCC"), alignment=TA_CENTER)
     s_sect   = ps("s", fontSize=9, fontName="Helvetica-Bold", leftIndent=4)
 
-    # Usable width A4 staand: 210 - 2*15 = 180mm
-    CW = [c * mm for c in [28, 112, 20]]
+    # Usable width A4 staand: 210 - 2*15 = 180mm → EAN=22, Omschrijving=138, Aantal=20
+    CW = [c * mm for c in [22, 138, 20]]
 
     items = [c for c in correcties if (c.get("definitief_aantal") or 0) > 0]
     items = sorted(items, key=lambda a: (

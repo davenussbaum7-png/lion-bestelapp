@@ -159,6 +159,7 @@ def laad_bestelling(winkelnaam: str) -> dict:
     )
     return {r["ean"]: r["quantity"] for r in _data(resp)}
 
+
 @st.cache_data(ttl=30)
 def laad_dbo_bestelling(winkelnaam: str) -> list:
     resp = (
@@ -413,6 +414,7 @@ def laad_order_status(winkelnaam: str) -> str:
     )
     rows = _data(resp)
     return rows[0]["status"] if rows else "geen_bestelling"
+
 
 @st.cache_data(ttl=30)
 def laad_order_status_info(winkelnaam: str) -> dict:
