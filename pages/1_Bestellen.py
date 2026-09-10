@@ -421,14 +421,8 @@ with tab_cart:
                 with col1:
                     st.markdown(f"<p class='art-label'>{art['artikel']}</p>", unsafe_allow_html=True)
                 with col2:
-                    st.number_input(
-                        label=f"_{ean}_cart",
-                        min_value=0,
-                        max_value=999,
-                        step=1,
-                        label_visibility="collapsed",
-                        key=f"art_{ean}",
-                    )
+                    qty = st.session_state.get(f"art_{ean}", 0)
+                    st.markdown(f"<p style='text-align:right;font-weight:700;padding-top:4px'>{qty}</p>", unsafe_allow_html=True)
             st.markdown("")
 
         # DBO samenvatting — alleen tonen als niet vergrendeld
