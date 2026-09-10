@@ -29,6 +29,16 @@ st.set_page_config(
     layout="wide",
 )
 
+# ─── Verberg Streamlit-branding ───────────────────────────────────────────────
+st.markdown("""
+<style>
+[data-testid="stToolbar"] { display: none !important; }
+.stDeployButton { display: none !important; }
+footer { display: none !important; }
+#MainMenu { display: none !important; }
+</style>
+""", unsafe_allow_html=True)
+
 # ─── Toegangscontrole ─────────────────────────────────────────────────────────
 if st.session_state.get("rol") != "winkel":
     st.warning("Je bent niet ingelogd. Ga terug naar de hoofdpagina.")
