@@ -533,7 +533,7 @@ with wb_tab2:
 with wb_tab3:
     st.caption(
         "Stel een eigen PIN in per winkel. "
-        "Als je de PIN leeg laat, valt de winkel terug op het gedeelde wachtwoord uit `config.py`."
+        "Als je de PIN leeg laat, valt de winkel terug op het gedeelde wachtwoord uit de app-instellingen."
     )
     if not alle_winkels:
         st.info("Geen winkels gevonden.")

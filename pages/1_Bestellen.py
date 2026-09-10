@@ -44,6 +44,11 @@ from utils.database import (
     laad_buffer, wis_buffer, sla_buffer_op,
 )
 
+def _invalideer_winkel_cache(winkelnaam: str):
+    """Wis gecachede data na een opslaan, zodat de volgende rerun verse data toont."""
+    laad_dbo_bestelling.clear()
+    laad_order_status_info.clear()
+
 # ─── Stijl ────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
@@ -69,13 +74,6 @@ footer { display: none !important; }
 .status-stap.actief { color: #222; font-weight: 600; }
 .status-stap.klaar { color: #2e7d32; font-weight: 600; }
 .status-pijl { color: #ccc; }
-.cart-badge {
-    text-align: center;
-    padding-top: 6px;
-    color: #059669;
-    font-weight: 700;
-    font-size: 0.9rem;
-}
 .sectie-header {
     font-weight: 700;
     font-size: 0.95rem;
@@ -333,15 +331,8 @@ with tab_alle:
                 col_art, col_num = st.columns([5, 1])
                 with col_art:
                     st.markdown(f"<p class='art-label'>{label}</p>", unsafe_allow_html=True)
-
-                if ean in _cart_eans:
-                    qty = st.session_state.get(f"art_{ean}", 0)
-                    col_num.markdown(
-                        f"<div class='cart-badge'>✓ {qty}</div>",
-                        unsafe_allow_html=True,
-                    )
-                else:
-                    col_num.number_input(
+                with col_num:
+                    st.number_input(
                         label=f"_{ean}",
                         min_value=0,
                         max_value=999,
@@ -494,6 +485,7 @@ if _opslaan:
         if vergrendeld:
             # Sla op in buffer voor de volgende ronde
             sla_buffer_op(winkelnaam, nieuwe_orders)
+            _invalideer_winkel_cache(winkelnaam)
             st.session_state["_buffer_actief"] = True
             ingevuld = sum(1 for v in nieuwe_orders.values() if v > 0)
             st.session_state["_save_result"] = {
@@ -506,6 +498,7 @@ if _opslaan:
             st.session_state.pop("_buffer_geladen", None)
             sla_bestelling_op(winkelnaam, nieuwe_orders)
             sla_dbo_op(winkelnaam, nieuwe_dbo)
+            _invalideer_winkel_cache(winkelnaam)
             ingevuld = sum(1 for v in nieuwe_orders.values() if v > 0) + len(nieuwe_dbo)
             st.session_state["_save_result"] = {
                 "ok": True,
