@@ -318,13 +318,16 @@ with tab_alle:
         secties.setdefault(s, []).append(art)
 
     # Natural sort: getallen in sectienamen numerisch vergelijken (6 CM < 8 CM < 10 CM)
-    for sectie, artikelen_sectie in sorted(secties.items(), key=lambda x: _sectie_sort_key(x[0])):
+    # Bij actieve zoekterm: secties altijd open (zodat ze niet dichtklappen bij getal invoer)
+    _secties_gesorteerd = sorted(secties.items(), key=lambda x: _sectie_sort_key(x[0]))
+    _auto_expand = bool(zoekterm.strip()) and len(_secties_gesorteerd) <= 5
+    for sectie, artikelen_sectie in _secties_gesorteerd:
         in_cart = sum(1 for a in artikelen_sectie if a["ean"] in _cart_eans)
         sectie_label = f"📦 {sectie} ({len(artikelen_sectie)} artikelen)"
         if in_cart > 0:
             sectie_label += f" · ✅ {in_cart} besteld"
 
-        with st.expander(sectie_label, expanded=False):
+        with st.expander(sectie_label, expanded=_auto_expand):
             for art in artikelen_sectie:
                 ean   = art["ean"]
                 label = art["artikel"]
