@@ -104,39 +104,41 @@ _status      = _status_info.get("status", "geen_bestelling")
 _bijgewerkt  = _status_info.get("bijgewerkt")
 vergrendeld  = _status in ("piklijst_klaar", "pakket_onderweg")
 
-# ─── Session state initialiseren (eenmalig vanuit DB bij eerste laad) ─────────
-if f"_geladen_{winkelnaam}" not in st.session_state:
+# ─── Session state: permanente backup (overleeft gesloten expanders) ──────────
+# Kernprobleem: Streamlit kan widget-keys wissen wanneer een widget niet
+# gerenderd wordt (bijv. sectie-expander gesloten bij rerun). Oplossing:
+# sla aantallen op in _qty_backup — een gewone dict, GEEN widget-key,
+# dus Streamlit wist hem nooit automatisch.
+_BACKUP_KEY = f"_qty_backup_{winkelnaam}"
+
+if _BACKUP_KEY not in st.session_state:
+    # Eerste load: initialiseer vanuit DB
     if vergrendeld:
-        # Vergrendeld: laad buffer (pre-orders voor de volgende ronde)
         buffer = laad_buffer(winkelnaam)
-        for art in artikelen_db:
-            ean = art["ean"]
-            st.session_state[f"art_{ean}"] = buffer.get(ean, 0) or 0
-        if buffer:
+        _init_qty = {art["ean"]: buffer.get(art["ean"], 0) or 0 for art in artikelen_db}
+        if any(v > 0 for v in _init_qty.values()):
             st.session_state["_buffer_actief"] = True
     else:
-        # Niet vergrendeld: laad huidige actieve bestelling
         opgeslagen = laad_bestelling(winkelnaam)
-        for art in artikelen_db:
-            ean = art["ean"]
-            st.session_state[f"art_{ean}"] = opgeslagen.get(ean, 0) or 0
-        # Buffer check: als er geen lopende bestelling is maar wel een buffer (na reset)
-        heeft_lopende = any(st.session_state.get(f"art_{a['ean']}", 0) > 0 for a in artikelen_db)
+        _init_qty = {art["ean"]: opgeslagen.get(art["ean"], 0) or 0 for art in artikelen_db}
+        heeft_lopende = any(v > 0 for v in _init_qty.values())
         if not heeft_lopende:
             buffer = laad_buffer(winkelnaam)
             if buffer:
                 for art in artikelen_db:
                     ean = art["ean"]
                     if ean in buffer and buffer[ean] > 0:
-                        st.session_state[f"art_{ean}"] = buffer[ean]
+                        _init_qty[ean] = buffer[ean]
                 st.session_state["_buffer_geladen"] = True
 
-    # DBO initialiseren
-    dbo_secties_init = ["01 1 PERS.DBO", "02 2 PERS.DBO", "03 3 Pers.DBO", "04 260 BR.DBO", "05 Diversen"]
+    st.session_state[_BACKUP_KEY] = _init_qty
+
+    # DBO initialiseren (sessie-state keys voor DBO-widgets)
+    _dbo_secties_init = ["01 1 PERS.DBO", "02 2 PERS.DBO", "03 3 Pers.DBO", "04 260 BR.DBO", "05 Diversen"]
     dbo_bestaand_init = {}
     for r in dbo_opgeslagen:
         dbo_bestaand_init.setdefault(r["sectie"], []).append(r)
-    for sectie_dbo in dbo_secties_init:
+    for sectie_dbo in _dbo_secties_init:
         bestaande = dbo_bestaand_init.get(sectie_dbo, [])
         n_rijen = max(10, len(bestaande) + 2)
         for i in range(n_rijen):
@@ -145,7 +147,19 @@ if f"_geladen_{winkelnaam}" not in st.session_state:
                 st.session_state[f"dbo_art_{sectie_dbo}_{i}"] = b.get("artikel", "")
             if f"dbo_qty_{sectie_dbo}_{i}" not in st.session_state:
                 st.session_state[f"dbo_qty_{sectie_dbo}_{i}"] = b.get("quantity", 0) or 0
-    st.session_state[f"_geladen_{winkelnaam}"] = True
+
+# ─── Sync widget-keys ↔ backup bij ELKE rerun ─────────────────────────────────
+# Wanneer een sectie-expander gesloten is worden de widgets daarin niet
+# gerenderd en kan Streamlit hun session_state-keys wissen.
+# Deze loop herstelt ze vanuit de backup VÓÓR de rendering plaatsvindt.
+_qty_bak = st.session_state[_BACKUP_KEY]
+for _art in artikelen_db:
+    _ean = _art["ean"]
+    _wk  = f"art_{_ean}"
+    if _wk in st.session_state:
+        _qty_bak[_ean] = st.session_state[_wk]   # widget aanwezig → update backup
+    else:
+        st.session_state[_wk] = _qty_bak.get(_ean, 0)  # widget weg → herstel
 
 # ─── Cart items berekenen ─────────────────────────────────────────────────────
 _cart_eans = {a["ean"] for a in artikelen_db if st.session_state.get(f"art_{a['ean']}", 0) > 0}
