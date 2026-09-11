@@ -29,16 +29,6 @@ st.set_page_config(
     layout="wide",
 )
 
-# ─── Verberg Streamlit-branding ───────────────────────────────────────────────
-st.markdown("""
-<style>
-[data-testid="stToolbar"] { display: none !important; }
-.stDeployButton { display: none !important; }
-footer { display: none !important; }
-#MainMenu { display: none !important; }
-</style>
-""", unsafe_allow_html=True)
-
 # ─── Toegangscontrole ─────────────────────────────────────────────────────────
 if st.session_state.get("rol") != "winkel":
     st.warning("Je bent niet ingelogd. Ga terug naar de hoofdpagina.")
@@ -278,6 +268,49 @@ elif _status == "besteld":
 
 st.markdown("---")
 
+# ─── DBO-fragment (geïsoleerde re-render bij invoer) ─────────────────────────
+@st.fragment
+def _render_dbo_sectie(dbo_opgeslagen: list, dbo_secties: list, vergrendeld: bool):
+    """
+    DBO-sectie als @st.fragment: klikken op +/- of typen triggert alleen
+    een re-render van dit blok — niet de volledige pagina met alle artikelen.
+    De session_state-keys (dbo_art_* / dbo_qty_*) die hier gezet worden zijn
+    gewoon zichtbaar voor de save-logica buiten dit fragment.
+    """
+    dbo_bestaand = {}
+    for r in dbo_opgeslagen:
+        dbo_bestaand.setdefault(r["sectie"], []).append(r)
+
+    st.subheader("DBO — Vrije invoer")
+    if vergrendeld:
+        st.caption("DBO-bestellingen kun je invullen zodra Wouter de nieuwe ronde start.")
+    else:
+        st.caption("Artikelen die niet in de lijst staan. Typ de naam en het aantal.")
+
+    for sectie_dbo in dbo_secties:
+        with st.expander(f"📝 {sectie_dbo}", expanded=False):
+            bestaande_regels = dbo_bestaand.get(sectie_dbo, [])
+            n_rijen = max(10, len(bestaande_regels) + 2)
+            for i in range(n_rijen):
+                c1, c2 = st.columns([4, 1])
+                with c1:
+                    st.text_input(
+                        "Artikel",
+                        key=f"dbo_art_{sectie_dbo}_{i}",
+                        label_visibility="collapsed",
+                        placeholder="Artikelnaam...",
+                        disabled=vergrendeld,
+                    )
+                with c2:
+                    st.number_input(
+                        "Aantal",
+                        min_value=0,
+                        max_value=999,
+                        key=f"dbo_qty_{sectie_dbo}_{i}",
+                        label_visibility="collapsed",
+                        disabled=vergrendeld,
+                    )
+
 # ─── Tabs ─────────────────────────────────────────────────────────────────────
 _tab_cart_label = f"🛒 Mijn bestelling ({_n_cart})" if _n_cart > 0 else "🛒 Mijn bestelling"
 tab_alle, tab_cart = st.tabs(["📝 Alle artikelen", _tab_cart_label])
@@ -356,41 +389,9 @@ with tab_alle:
 
     st.markdown("---")
 
-    # ─── DBO-secties ──────────────────────────────────────────────────────────
-    dbo_secties = ["01 1 PERS.DBO", "02 2 PERS.DBO", "03 3 Pers.DBO", "04 260 BR.DBO", "05 Diversen"]
-    dbo_bestaand = {}
-    for r in dbo_opgeslagen:
-        dbo_bestaand.setdefault(r["sectie"], []).append(r)
-
-    st.subheader("DBO — Vrije invoer")
-    if vergrendeld:
-        st.caption("DBO-bestellingen kun je invullen zodra Wouter de nieuwe ronde start.")
-    else:
-        st.caption("Artikelen die niet in de lijst staan. Typ de naam en het aantal.")
-
-    for sectie_dbo in dbo_secties:
-        with st.expander(f"📝 {sectie_dbo}", expanded=False):
-            bestaande_regels = dbo_bestaand.get(sectie_dbo, [])
-            n_rijen = max(10, len(bestaande_regels) + 2)
-            for i in range(n_rijen):
-                c1, c2 = st.columns([4, 1])
-                with c1:
-                    st.text_input(
-                        "Artikel",
-                        key=f"dbo_art_{sectie_dbo}_{i}",
-                        label_visibility="collapsed",
-                        placeholder="Artikelnaam...",
-                        disabled=vergrendeld,
-                    )
-                with c2:
-                    st.number_input(
-                        "Aantal",
-                        min_value=0,
-                        max_value=999,
-                        key=f"dbo_qty_{sectie_dbo}_{i}",
-                        label_visibility="collapsed",
-                        disabled=vergrendeld,
-                    )
+    # ─── DBO-secties (als geïsoleerd fragment) ────────────────────────────────
+    _dbo_secties = ["01 1 PERS.DBO", "02 2 PERS.DBO", "03 3 Pers.DBO", "04 260 BR.DBO", "05 Diversen"]
+    _render_dbo_sectie(dbo_opgeslagen, _dbo_secties, vergrendeld)
 
     st.markdown("---")
 
@@ -463,7 +464,7 @@ with tab_cart:
 _opslaan = opslaan or opslaan_footer or st.session_state.get("opslaan_cart", False)
 
 if _opslaan:
-    dbo_secties = ["01 1 PERS.DBO", "02 2 PERS.DBO", "03 3 Pers.DBO", "04 260 BR.DBO", "05 Diversen"]
+    _dbo_secties = ["01 1 PERS.DBO", "02 2 PERS.DBO", "03 3 Pers.DBO", "04 260 BR.DBO", "05 Diversen"]
     dbo_bestaand = {}
     for r in dbo_opgeslagen:
         dbo_bestaand.setdefault(r["sectie"], []).append(r)
@@ -475,7 +476,7 @@ if _opslaan:
 
     nieuwe_dbo = []
     if not vergrendeld:
-        for sectie_dbo in dbo_secties:
+        for sectie_dbo in _dbo_secties:
             bestaande_regels = dbo_bestaand.get(sectie_dbo, [])
             n_rijen = max(10, len(bestaande_regels) + 2)
             for i in range(n_rijen):
