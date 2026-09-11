@@ -184,6 +184,10 @@ if "_save_result" in st.session_state:
         st.error(_res["msg"])
         st.info("Ververs de pagina en probeer opnieuw. Als het probleem blijft, neem contact op met Wouter.")
 
+if "_save_toast" in st.session_state:
+    _toast = st.session_state.pop("_save_toast")
+    st.toast(_toast["msg"], icon=_toast["icon"])
+
 # ─── Statusbalk ───────────────────────────────────────────────────────────────
 def _stap_klasse(stap_statussen: tuple, huidig: str) -> str:
     volgorde = ["geen_bestelling", "besteld", "piklijst_klaar", "pakket_onderweg"]
@@ -406,51 +410,61 @@ with tab_alle:
 # TAB 2 — Mijn bestelling (cart)
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_cart:
-    if not _cart_eans:
+    # DBO-items bepalen (nodig voor lege-staat-check en voor weergave)
+    _dbo_gevuld = [
+        r for r in dbo_opgeslagen
+        if r.get("quantity", 0) > 0 and r.get("artikel", "").strip()
+    ] if not vergrendeld else []
+
+    _cart_leeg = not _cart_eans and not _dbo_gevuld
+
+    if _cart_leeg:
         if vergrendeld:
             st.info("🛒 Nog niets klaargezet voor de volgende ronde. Ga naar **Alle artikelen** om te bestellen.")
         else:
             st.info("🛒 Je hebt nog geen artikelen in je bestelling. Ga naar **Alle artikelen** om artikelen toe te voegen.")
     else:
+        # Samenvattingsbalk
         totaal_cart_stuks = sum(
             st.session_state.get(f"art_{a['ean']}", 0)
             for a in artikelen_db if a["ean"] in _cart_eans
         )
-        if vergrendeld:
-            st.info(f"**{totaal_cart_stuks} stuks** · **{_n_cart} artikelen** klaargezet voor de volgende ronde")
-        else:
-            st.info(f"**{totaal_cart_stuks} stuks** · **{_n_cart} artikelen** in bestelling")
+        _n_dbo_items = len(_dbo_gevuld)
+        _samenvatting_delen = []
+        if totaal_cart_stuks > 0:
+            _samenvatting_delen.append(f"**{totaal_cart_stuks} stuks** · **{_n_cart} artikelen**")
+        if _n_dbo_items > 0:
+            _samenvatting_delen.append(f"**{_n_dbo_items} DBO-regel{'s' if _n_dbo_items != 1 else ''}**")
+        if _samenvatting_delen:
+            _samenvatting_suffix = " klaargezet voor de volgende ronde" if vergrendeld else " in bestelling"
+            st.info(" · ".join(_samenvatting_delen) + _samenvatting_suffix)
 
-        cart_secties: dict = {}
-        for art in artikelen_db:
-            if art["ean"] in _cart_eans:
-                cart_secties.setdefault(art.get("sectie") or "Overig", []).append(art)
+        # Reguliere artikelen per sectie
+        if _cart_eans:
+            cart_secties: dict = {}
+            for art in artikelen_db:
+                if art["ean"] in _cart_eans:
+                    cart_secties.setdefault(art.get("sectie") or "Overig", []).append(art)
 
-        # Natural sort ook in cart-tab
-        for sectie, items in sorted(cart_secties.items(), key=lambda x: _sectie_sort_key(x[0])):
-            st.markdown(f"<div class='sectie-header'>{sectie}</div>", unsafe_allow_html=True)
-            for art in items:
-                ean = art["ean"]
-                col1, col2 = st.columns([5, 1])
-                with col1:
-                    st.markdown(f"<p class='art-label'>{art['artikel']}</p>", unsafe_allow_html=True)
-                with col2:
-                    qty = st.session_state.get(f"art_{ean}", 0)
-                    st.markdown(f"<p style='text-align:right;font-weight:700;padding-top:4px'>{qty}</p>", unsafe_allow_html=True)
-            st.markdown("")
+            for sectie, items in sorted(cart_secties.items(), key=lambda x: _sectie_sort_key(x[0])):
+                st.markdown(f"<div class='sectie-header'>{sectie}</div>", unsafe_allow_html=True)
+                for art in items:
+                    ean = art["ean"]
+                    col1, col2 = st.columns([5, 1])
+                    with col1:
+                        st.markdown(f"<p class='art-label'>{art['artikel']}</p>", unsafe_allow_html=True)
+                    with col2:
+                        qty = st.session_state.get(f"art_{ean}", 0)
+                        st.markdown(f"<p style='text-align:right;font-weight:700;padding-top:4px'>{qty}</p>", unsafe_allow_html=True)
+                st.markdown("")
 
-        # DBO samenvatting — alleen tonen als niet vergrendeld
-        if not vergrendeld:
-            dbo_gevuld = [
-                r for r in dbo_opgeslagen
-                if r.get("quantity", 0) > 0 and r.get("artikel", "").strip()
-            ]
-            if dbo_gevuld:
-                st.markdown("---")
-                st.markdown("<div class='sectie-header'>DBO — Vrije invoer</div>", unsafe_allow_html=True)
-                for r in dbo_gevuld:
-                    st.markdown(f"- **{r['artikel']}** ({r['sectie']}): {r['quantity']} st")
-                st.caption("Aanpassen? Open 'Alle artikelen' → DBO-sectie hieronder.")
+        # DBO samenvatting — altijd tonen als er DBO-items zijn (ook zonder reguliere artikelen)
+        if _dbo_gevuld:
+            st.markdown("---")
+            st.markdown("<div class='sectie-header'>DBO — Vrije invoer</div>", unsafe_allow_html=True)
+            for r in _dbo_gevuld:
+                st.markdown(f"- **{r['artikel']}** ({r['sectie']}): {r['quantity']} st")
+            st.caption("Aanpassen? Open 'Alle artikelen' → DBO-sectie hieronder.")
 
         st.markdown("---")
         opslaan_cart = st.button(
@@ -496,10 +510,9 @@ if _opslaan:
             _invalideer_winkel_cache(winkelnaam)
             st.session_state["_buffer_actief"] = True
             ingevuld = sum(1 for v in nieuwe_orders.values() if v > 0)
-            st.session_state["_save_result"] = {
-                "ok": True,
-                "msg": f"✅ Bestelling klaargezet voor de volgende ronde! {ingevuld} artikelen. Wouter laadt dit automatisch in.",
-            }
+            _msg_ok = f"✅ Bestelling klaargezet voor de volgende ronde! {ingevuld} artikelen. Wouter laadt dit automatisch in."
+            st.session_state["_save_result"] = {"ok": True, "msg": _msg_ok}
+            st.session_state["_save_toast"]  = {"msg": _msg_ok, "icon": "✅"}
         else:
             # Normale opslag als actieve bestelling
             wis_buffer(winkelnaam)
@@ -508,13 +521,11 @@ if _opslaan:
             sla_dbo_op(winkelnaam, nieuwe_dbo)
             _invalideer_winkel_cache(winkelnaam)
             ingevuld = sum(1 for v in nieuwe_orders.values() if v > 0) + len(nieuwe_dbo)
-            st.session_state["_save_result"] = {
-                "ok": True,
-                "msg": f"✅ Bestelling week {_leverweek} opgeslagen! {ingevuld} regels ingevuld.",
-            }
+            _msg_ok = f"✅ Bestelling week {_leverweek} opgeslagen! {ingevuld} regels ingevuld."
+            st.session_state["_save_result"] = {"ok": True, "msg": _msg_ok}
+            st.session_state["_save_toast"]  = {"msg": _msg_ok, "icon": "✅"}
     except Exception as fout:
-        st.session_state["_save_result"] = {
-            "ok": False,
-            "msg": f"❌ Fout bij opslaan: {fout}",
-        }
+        _msg_err = f"❌ Fout bij opslaan: {fout}"
+        st.session_state["_save_result"] = {"ok": False, "msg": _msg_err}
+        st.session_state["_save_toast"]  = {"msg": _msg_err, "icon": "❌"}
     st.rerun()
