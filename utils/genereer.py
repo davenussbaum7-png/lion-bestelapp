@@ -21,16 +21,50 @@ def _datum_label(datum=None) -> str:
     return f"Week {week}  ·  {d.day} {maanden[d.month]} {d.year}"
 
 
+# ─── Pad-code normalisatie ────────────────────────────────────────────────────
+def _normalize_pad_code(raw):
+    """
+    Zet een ruwe pad-waarde om naar een schoon pad-nummer (evt. + letter).
+    Werkt alleen als 'raw' al met een getal begint (bijv. '01 1 PERS.DBO' -> '1').
+    Geeft '' terug als er geen getal in te herkennen valt (bijv. 'BADGOED').
+    """
+    if not raw:
+        return ""
+    raw = str(raw).strip()
+    if re.match(r'^\d+[A-Za-z]*$', raw):
+        return raw
+    m = re.match(r'^(\d{1,2})\s', raw)
+    if m:
+        return str(int(m.group(1)))
+    return ""
+
+
 # ─── Verrijken en sorteren ────────────────────────────────────────────────────
 def bouw_artikellijst(winkelnaam, orders, dbo_orders, sap_data, artikelen_db):
     """
     Combineer winkelbestelling + SAP-data tot een gesorteerde artikellijst.
     orders      : {ean: quantity}  — winkelbestelling
     dbo_orders  : [{sectie, artikel, quantity}]
-    sap_data    : {ean: {stuks_verkocht, voorraad_centraal, artikel}}
+    sap_data    : {ean: {stuks_verkocht, voorraad_centraal, artikel, groepsnaam}}
     artikelen_db: [{ean, artikel, sectie, pad_code, volgorde}]
+
+    Elk artikel krijgt altijd een niet-lege sectie én een niet-lege pad_code:
+    - pad_code komt bij voorkeur uit de artikelcatalogus (echte padroute).
+    - ontbreekt die, dan wordt een pad afgeleid uit de sectienaam als die met
+      een getal begint (bijv. '01 1 PERS.DBO' -> pad '1').
+    - lukt dat niet (secties zoals 'BADGOED', 'DEKBEDDEN', 'KEUKENGOED' hebben
+      geen getal in de naam), dan krijgt de HELE sectie een gedeelde fictieve
+      pad-code (90, 91, 92, ...) zodat items uit dezelfde sectie bij elkaar op
+      één blad blijven staan i.p.v. door elkaar gesorteerd te raken.
+      Deze fictieve pads zijn duidelijk herkenbaar (>=90) en zijn bedoeld om
+      later te vervangen door de echte looproute (via 'Padcodes uploaden').
+    - heeft een artikel zelfs geen sectienaam (noch catalogus, noch SAP-groep),
+      dan wordt het gelabeld als 'Onbekend — controleer artikelcatalogus' zodat
+      het zichtbaar blijft i.p.v. stilzwijgend te verdwijnen.
     """
     catalogus = {a["ean"]: a for a in artikelen_db if a.get("ean")}
+
+    # Sectie -> pad, opgebouwd uit catalogus-artikelen die al een echte pad hebben.
     sectie_pad = {}
     for a in artikelen_db:
         s = a.get("sectie")
@@ -38,20 +72,15 @@ def bouw_artikellijst(winkelnaam, orders, dbo_orders, sap_data, artikelen_db):
         if s and p and s not in sectie_pad:
             sectie_pad[s] = p
 
-    def normalize_pad_code(raw):
-        if not raw:
-            return ""
-        raw = str(raw).strip()
-        if re.match(r'^\d+[A-Za-z]*$', raw):
-            return raw
-        m = re.match(r'^(\d{1,2})\s', raw)
-        if m:
-            return str(int(m.group(1)))
-        return ""
+    def bepaal_pad(sectie, cat_pad_code):
+        """Gedeelde pad-bepaling voor zowel handmatig bestelde als SAP-only artikelen."""
+        raw = cat_pad_code or sectie_pad.get(sectie) or sectie
+        return _normalize_pad_code(raw)
 
     bestelde_eans = set(orders.keys())
     resultaat = []
-    # 1. Winkelbestellingen
+
+    # 1. Winkelbestellingen (handmatig door de winkel ingevuld)
     for ean, besteld in orders.items():
         if besteld <= 0:
             continue
@@ -61,18 +90,21 @@ def bouw_artikellijst(winkelnaam, orders, dbo_orders, sap_data, artikelen_db):
         voorraad = sap.get("voorraad_centraal", 999)
         if voorraad is None:
             voorraad = 999
+        sectie = cat.get("sectie") or sap.get("groepsnaam") or ""
         resultaat.append({
-            "type":       "ARTIKEL",
-            "ean":        ean,
-            "artikel":    cat.get("artikel") or sap.get("artikel") or ean,
-            "sectie":     cat.get("sectie") or sap.get("groepsnaam") or "",
-            "pad_code":   normalize_pad_code(cat.get("pad_code") or ""),
-            "volgorde":   cat.get("volgorde") or 9999,
-            "besteld":    besteld,
-            "sap":        stuks,
+            "type":        "ARTIKEL",
+            "ean":         ean,
+            "artikel":     cat.get("artikel") or sap.get("artikel") or ean,
+            "sectie":      sectie,
+            "pad_code":    bepaal_pad(sectie, cat.get("pad_code")),
+            "volgorde":    cat.get("volgorde") or 9999,
+            "besteld":     besteld,
+            "sap":         stuks,
+            "voorraad":    voorraad,
             "op_voorraad": voorraad > 0,
         })
-    # 2. SAP-only (niet besteld door winkel, wel in SAP)
+
+    # 2. SAP-only (niet handmatig besteld door winkel, wel aanvulling nodig volgens SAP)
     for ean, sap in sap_data.items():
         if ean in bestelde_eans:
             continue
@@ -83,37 +115,58 @@ def bouw_artikellijst(winkelnaam, orders, dbo_orders, sap_data, artikelen_db):
         voorraad = sap.get("voorraad_centraal", 999)
         if voorraad is None:
             voorraad = 999
-        sectie_sap = cat.get("sectie") or sap.get("groepsnaam") or ""
-        raw_pad_sap = cat.get("pad_code") or sectie_pad.get(sectie_sap) or sectie_sap
+        sectie = cat.get("sectie") or sap.get("groepsnaam") or ""
         resultaat.append({
-            "type":       "SAP",
-            "ean":        ean,
-            "artikel":    cat.get("artikel") or sap.get("artikel") or ean,
-            "sectie":     sectie_sap,
-            "pad_code":   normalize_pad_code(raw_pad_sap),
-            "volgorde":   cat.get("volgorde") or 9999,
-            "besteld":    0,
-            "sap":        stuks,
+            "type":        "SAP",
+            "ean":         ean,
+            "artikel":     cat.get("artikel") or sap.get("artikel") or ean,
+            "sectie":      sectie,
+            "pad_code":    bepaal_pad(sectie, cat.get("pad_code")),
+            "volgorde":    cat.get("volgorde") or 9999,
+            "besteld":     0,
+            "sap":         stuks,
+            "voorraad":    voorraad,
             "op_voorraad": voorraad > 0,
         })
-    # 3. DBO vrije regels
+
+    # 3. DBO vrije regels (winkel typt zelf artikel + aantal in)
     for dbo in dbo_orders:
         qty = dbo.get("quantity", 0) or 0
         if qty <= 0:
             continue
-        sectie_dbo = dbo.get("sectie", "DBO")
-        raw_pad_dbo = sectie_pad.get(sectie_dbo) or sectie_dbo
+        sectie_dbo = dbo.get("sectie") or "DBO"
         resultaat.append({
-            "type":       "DBO",
-            "ean":        None,
-            "artikel":    dbo.get("artikel", ""),
-            "sectie":     sectie_dbo,
-            "pad_code":   normalize_pad_code(raw_pad_dbo),
-            "volgorde":   -1,
-            "besteld":    qty,
-            "sap":        0,
+            "type":        "DBO",
+            "ean":         None,
+            "artikel":     dbo.get("artikel", ""),
+            "sectie":      sectie_dbo,
+            "pad_code":    bepaal_pad(sectie_dbo, None),
+            "volgorde":    -1,
+            "besteld":     qty,
+            "sap":         0,
+            "voorraad":    None,
             "op_voorraad": True,
         })
+
+    # ── Fictieve pad-codes voor secties zonder herkenbaar getal ───────────────
+    # (bijv. 'BADGOED', 'BADJAS', 'DEKBEDDEN', 'KEUKENGOED', 'MATRASDEK', ...)
+    # Zonder deze stap krijgen ALLE items zonder pad dezelfde lege pad_code en
+    # worden ze op één blad samengegooid, gesorteerd op artikelnaam i.p.v. op
+    # sectie — met door elkaar springende sectiekoppen tot gevolg.
+    ontbrekende_secties = sorted({
+        a["sectie"] or "Onbekend — controleer artikelcatalogus"
+        for a in resultaat if not a["pad_code"]
+    })
+    fictief_pad = {sectie: str(90 + i) for i, sectie in enumerate(ontbrekende_secties)}
+    for a in resultaat:
+        if not a["pad_code"]:
+            sectie_key = a["sectie"] or "Onbekend — controleer artikelcatalogus"
+            if not a["sectie"]:
+                a["sectie"] = sectie_key
+            a["pad_code"] = fictief_pad[sectie_key]
+            a["pad_fictief"] = True
+        else:
+            a["pad_fictief"] = False
 
     def pad_sort_key(code):
         if not code:
@@ -142,6 +195,7 @@ def schrijf_piklijst_pdf(winkelnaam, artikelen, pad_groepen=None, datum=None):
     from reportlab.lib.enums import TA_CENTER
 
     datum_label = _datum_label(datum)
+    heeft_fictieve_pads = any(a.get("pad_fictief") for a in artikelen)
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -172,21 +226,24 @@ def schrijf_piklijst_pdf(winkelnaam, artikelen, pad_groepen=None, datum=None):
     s_leg    = ps("l", fontSize=7, fontName="Helvetica-Oblique",
                   textColor=colors.HexColor("#555555"))
 
-    CW = [c * mm for c in [8, 46, 98, 13, 13, 13, 13, 26, 47]]
-    HDRS = ["Pad", "Sectie", "Artikel", "Besteld", "SAP", "Totaal", "Gepakt □", "EAN", "Opmerking"]
+    # 10 kolommen i.p.v. 9: Voorraad-kolom toegevoegd, totaal blijft 277mm.
+    CW = [c * mm for c in [8, 40, 84, 12, 12, 12, 12, 18, 26, 45]]
+    HDRS = ["Pad", "Sectie", "Artikel", "Besteld", "SAP", "Voorr.", "Totaal", "Gepakt □", "EAN", "Opmerking"]
 
     def header_row():
         return [Paragraph(h, s_hdr) for h in HDRS]
 
     def titel_tabel():
+        legende = (
+            "VET + dikke rand = NIET OP VOORRAAD   |   Cursief = SAP aanvulling of DBO vrije invoer"
+            f"   |   <b>{datum_label}</b>"
+        )
+        if heeft_fictieve_pads:
+            legende += "   |   Pad ≥ 90 = <b>fictieve</b> looproute (nog niet de echte padindeling)"
         t = Table(
             [
                 [Paragraph(f"PIKLIJST — {winkelnaam.upper()}", s_titel)],
-                [Paragraph(
-                    f"VET + dikke rand = NIET OP VOORRAAD   |   Cursief = SAP aanvulling of DBO vrije invoer"
-                    f"   |   <b>{datum_label}</b>",
-                    s_leg,
-                )],
+                [Paragraph(legende, s_leg)],
             ],
             colWidths=[sum(CW)],
         )
@@ -240,7 +297,7 @@ def schrijf_piklijst_pdf(winkelnaam, artikelen, pad_groepen=None, datum=None):
             if sectie != huidige_sectie:
                 huidige_sectie = sectie
                 ri = len(rows)
-                rows.append([Paragraph(f"  {sectie}", s_sect)] + [""] * 8)
+                rows.append([Paragraph(f"  {sectie}", s_sect)] + [""] * 9)
                 sect_rows.append(ri)
                 zebra = True
 
@@ -256,9 +313,10 @@ def schrijf_piklijst_pdf(winkelnaam, artikelen, pad_groepen=None, datum=None):
             else:
                 opmerking, st = "", s_norm
 
-            besteld_v = art["besteld"] or ""
-            sap_v     = art["sap"] if art["sap"] else ""
-            totaal_v  = (art["besteld"] or 0) + (art["sap"] or 0)
+            besteld_v  = art["besteld"] or ""
+            sap_v      = art["sap"] if art["sap"] else ""
+            totaal_v   = (art["besteld"] or 0) + (art["sap"] or 0)
+            voorraad_v = "—" if art.get("voorraad") is None else str(art["voorraad"])
 
             ri = len(rows)
             rows.append([
@@ -267,6 +325,7 @@ def schrijf_piklijst_pdf(winkelnaam, artikelen, pad_groepen=None, datum=None):
                 Paragraph(art["artikel"] or "", st),
                 Paragraph(str(besteld_v), s_center) if besteld_v != "" else "",
                 Paragraph(str(sap_v),     s_center) if sap_v     != "" else "",
+                Paragraph(voorraad_v,     s_center),
                 Paragraph(str(totaal_v),  s_center) if totaal_v       else "",
                 "",
                 Paragraph(str(art["ean"] or ""), s_center),
@@ -470,7 +529,7 @@ def maak_zip(bestanden: dict, suffix: str = "") -> bytes:
 def lees_sap_xlsx(bestand_bytes) -> tuple:
     """
     Leest een SAP-export xlsx (bytes).
-    Geeft (winkelnaam, [{ean, artikel, stuks_verkocht, voorraad_centraal}]) terug.
+    Geeft (winkelnaam, [{ean, artikel, stuks_verkocht, voorraad_centraal, groepsnaam}]) terug.
     """
     buf = io.BytesIO(bestand_bytes)
     wb  = openpyxl.load_workbook(buf, data_only=True)
