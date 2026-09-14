@@ -52,7 +52,7 @@ def _invalideer_winkel_cache(winkelnaam: str):
 # ─── Stijl ────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-.art-label { font-size: 0.92rem; font-weight: 600; margin: 0; line-height: 1.3; }
+.art-label { font-size: 1.08rem; font-weight: 600; margin: 0; line-height: 1.4; }
 div[data-testid="stNumberInput"] label { display: none; }
 .stExpander div[data-testid="stVerticalBlock"] { gap: 0.2rem; }
 [data-testid="stToolbar"] { display: none !important; }
