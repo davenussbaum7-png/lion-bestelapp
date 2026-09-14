@@ -11,7 +11,7 @@ st.set_page_config(
 )
 
 # ─── Toegangscontrole ─────────────────────────────────────────────────────────
-if st.session_state.get("rol") != "beheer":
+if st.session_state.get("rol") != "beheerder":
     st.warning("Toegang geweigerd. Log in als beheerder.")
     if st.button("← Naar inlogpagina"):
         st.switch_page("app.py")
