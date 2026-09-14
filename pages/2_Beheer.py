@@ -381,9 +381,12 @@ else:
             if not correcties:
                 st.warning(f"⚠️ Geen correcties gevonden voor {winkelnaam}, overgeslagen.")
                 continue
-            pdf_bytes = schrijf_paklijst_pdf(winkelnaam, correcties)
-            paklijsten[winkelnaam] = pdf_bytes
-            st.success(f"✅ Paklijst gegenereerd voor {winkelnaam}")
+            try:
+                pdf_bytes = schrijf_paklijst_pdf(winkelnaam, correcties)
+                paklijsten[winkelnaam] = pdf_bytes
+                st.success(f"✅ Paklijst gegenereerd voor {winkelnaam}")
+            except Exception as e:
+                st.error(f"❌ Fout bij genereren paklijst voor {winkelnaam}: {e}")
         if paklijsten:
             st.session_state["paklijsten_pdf"] = paklijsten
 
