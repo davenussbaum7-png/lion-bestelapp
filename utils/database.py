@@ -65,6 +65,11 @@ def controleer_pin(winkelnaam: str, pin: str) -> bool:
 
 
 # ─── Artikelen ────────────────────────────────────────────────────────────────
+# Sectie-marker-rijen (zie update_pad_codes_by_sectie) gebruiken dit EAN-voorvoegsel
+# zodat ze nooit met een echt artikel kunnen botsen.
+SECTIE_MARKER_PREFIX = "__SECTIE__"
+
+
 @st.cache_data(ttl=3600)
 def laad_artikelen() -> list:
     # Supabase heeft standaard een limit van 1000 rijen; haal alles op in batches
@@ -89,12 +94,45 @@ def laad_artikelen() -> list:
 
 
 def update_pad_codes(pad_codes: dict):
+    """Werkt pad_code bij per EAN (bestaand gedrag, voor artikelen die al in de catalogus staan)."""
     sb = _sb()
     bijgewerkt = 0
     for ean, pad in pad_codes.items():
         if pad:
             sb.table("articles").update({"pad_code": pad}).eq("ean", ean).execute()
             bijgewerkt += 1
+    laad_artikelen.clear()
+    return bijgewerkt
+
+
+def update_pad_codes_by_sectie(sectie_pad: dict) -> int:
+    """
+    Werkt de pad-code bij voor een HELE sectie in één keer, i.p.v. per EAN.
+    - Werkt eerst alle bestaande catalogus-artikelen met deze sectie bij.
+    - Zet daarnaast een 'sectie-marker'-rij (EAN begint met __SECTIE__) zodat de
+      pad ook geldt voor artikelen die (nog) niet los in de catalogus staan
+      (bijv. artikelen die alleen via een SAP-export bekend zijn). bouw_artikellijst()
+      in genereer.py gebruikt deze marker-rij automatisch als sectie-fallback.
+    sectie_pad: {sectie_naam: pad_code}
+    Geeft het aantal bijgewerkte secties terug.
+    """
+    sb = _sb()
+    bijgewerkt = 0
+    for sectie, pad in sectie_pad.items():
+        if not sectie or not pad:
+            continue
+        sb.table("articles").update({"pad_code": pad}).eq("sectie", sectie).execute()
+        sb.table("articles").upsert(
+            {
+                "ean":      f"{SECTIE_MARKER_PREFIX}{sectie}",
+                "artikel":  "(sectie-marker — niet verwijderen)",
+                "sectie":   sectie,
+                "pad_code": pad,
+                "volgorde": 9999,
+            },
+            on_conflict="ean",
+        ).execute()
+        bijgewerkt += 1
     laad_artikelen.clear()
     return bijgewerkt
 
@@ -256,6 +294,7 @@ def sla_sap_op(winkelnaam: str, sap_data: list):
             "artikel":           v.get("artikel", ""),
             "stuks_verkocht":    v.get("stuks_verkocht", 0),
             "voorraad_centraal": v.get("voorraad_centraal", 0),
+            "groepsnaam":        v.get("groepsnaam", ""),
         }
         for v in gezien.values()
         if v.get("ean")

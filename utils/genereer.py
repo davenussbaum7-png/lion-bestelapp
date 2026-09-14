@@ -65,7 +65,17 @@ def bouw_artikellijst(winkelnaam, orders, dbo_orders, sap_data, artikelen_db):
     catalogus = {a["ean"]: a for a in artikelen_db if a.get("ean")}
 
     # Sectie -> pad, opgebouwd uit catalogus-artikelen die al een echte pad hebben.
+    # Sectie-marker-rijen (ean begint met __SECTIE__, gezet via 'Padcodes per sectie'
+    # in Beheer) zijn de bedoelde, expliciete bron en krijgen voorrang. Zonder marker
+    # valt het terug op het eerste catalogusartikel van die sectie dat toevallig al
+    # een pad heeft — minder betrouwbaar, want afhankelijk van laadvolgorde.
     sectie_pad = {}
+    for a in artikelen_db:
+        s = a.get("sectie")
+        p = a.get("pad_code")
+        ean = a.get("ean") or ""
+        if s and p and str(ean).startswith("__SECTIE__"):
+            sectie_pad[s] = p
     for a in artikelen_db:
         s = a.get("sectie")
         p = a.get("pad_code")
@@ -73,9 +83,20 @@ def bouw_artikellijst(winkelnaam, orders, dbo_orders, sap_data, artikelen_db):
             sectie_pad[s] = p
 
     def bepaal_pad(sectie, cat_pad_code):
-        """Gedeelde pad-bepaling voor zowel handmatig bestelde als SAP-only artikelen."""
-        raw = cat_pad_code or sectie_pad.get(sectie) or sectie
-        return _normalize_pad_code(raw)
+        """
+        Dubbele check: kijkt zowel naar de pad die specifiek op dit EAN staat
+        (cat_pad_code) als naar de pad die voor de hele sectie bekend is
+        (sectie_pad). Het EAN-niveau wint altijd (specifieker), maar als beide
+        bekend zijn én ze verschillen, is dat vaak een fout in de catalogus
+        (bijv. één artikel per ongeluk aan het verkeerde pad gekoppeld) — dat
+        geven we terug als 'conflict' zodat het zichtbaar gemaakt kan worden.
+        Geeft (pad_code, conflict: bool) terug.
+        """
+        ean_pad      = _normalize_pad_code(cat_pad_code) if cat_pad_code else ""
+        sectie_pad_v = _normalize_pad_code(sectie_pad.get(sectie) or sectie)
+        if ean_pad and sectie_pad_v and ean_pad != sectie_pad_v:
+            return ean_pad, True
+        return (ean_pad or sectie_pad_v), False
 
     bestelde_eans = set(orders.keys())
     resultaat = []
@@ -91,17 +112,19 @@ def bouw_artikellijst(winkelnaam, orders, dbo_orders, sap_data, artikelen_db):
         if voorraad is None:
             voorraad = 999
         sectie = cat.get("sectie") or sap.get("groepsnaam") or ""
+        pad_code, pad_conflict = bepaal_pad(sectie, cat.get("pad_code"))
         resultaat.append({
-            "type":        "ARTIKEL",
-            "ean":         ean,
-            "artikel":     cat.get("artikel") or sap.get("artikel") or ean,
-            "sectie":      sectie,
-            "pad_code":    bepaal_pad(sectie, cat.get("pad_code")),
-            "volgorde":    cat.get("volgorde") or 9999,
-            "besteld":     besteld,
-            "sap":         stuks,
-            "voorraad":    voorraad,
-            "op_voorraad": voorraad > 0,
+            "type":         "ARTIKEL",
+            "ean":          ean,
+            "artikel":      cat.get("artikel") or sap.get("artikel") or ean,
+            "sectie":       sectie,
+            "pad_code":     pad_code,
+            "pad_conflict": pad_conflict,
+            "volgorde":     cat.get("volgorde") or 9999,
+            "besteld":      besteld,
+            "sap":          stuks,
+            "voorraad":     voorraad,
+            "op_voorraad":  voorraad > 0,
         })
 
     # 2. SAP-only (niet handmatig besteld door winkel, wel aanvulling nodig volgens SAP)
@@ -116,17 +139,19 @@ def bouw_artikellijst(winkelnaam, orders, dbo_orders, sap_data, artikelen_db):
         if voorraad is None:
             voorraad = 999
         sectie = cat.get("sectie") or sap.get("groepsnaam") or ""
+        pad_code, pad_conflict = bepaal_pad(sectie, cat.get("pad_code"))
         resultaat.append({
-            "type":        "SAP",
-            "ean":         ean,
-            "artikel":     cat.get("artikel") or sap.get("artikel") or ean,
-            "sectie":      sectie,
-            "pad_code":    bepaal_pad(sectie, cat.get("pad_code")),
-            "volgorde":    cat.get("volgorde") or 9999,
-            "besteld":     0,
-            "sap":         stuks,
-            "voorraad":    voorraad,
-            "op_voorraad": voorraad > 0,
+            "type":         "SAP",
+            "ean":          ean,
+            "artikel":      cat.get("artikel") or sap.get("artikel") or ean,
+            "sectie":       sectie,
+            "pad_code":     pad_code,
+            "pad_conflict": pad_conflict,
+            "volgorde":     cat.get("volgorde") or 9999,
+            "besteld":      0,
+            "sap":          stuks,
+            "voorraad":     voorraad,
+            "op_voorraad":  voorraad > 0,
         })
 
     # 3. DBO vrije regels (winkel typt zelf artikel + aantal in)
@@ -135,17 +160,19 @@ def bouw_artikellijst(winkelnaam, orders, dbo_orders, sap_data, artikelen_db):
         if qty <= 0:
             continue
         sectie_dbo = dbo.get("sectie") or "DBO"
+        pad_code, pad_conflict = bepaal_pad(sectie_dbo, None)
         resultaat.append({
-            "type":        "DBO",
-            "ean":         None,
-            "artikel":     dbo.get("artikel", ""),
-            "sectie":      sectie_dbo,
-            "pad_code":    bepaal_pad(sectie_dbo, None),
-            "volgorde":    -1,
-            "besteld":     qty,
-            "sap":         0,
-            "voorraad":    None,
-            "op_voorraad": True,
+            "type":         "DBO",
+            "ean":          None,
+            "artikel":      dbo.get("artikel", ""),
+            "sectie":       sectie_dbo,
+            "pad_code":     pad_code,
+            "pad_conflict": pad_conflict,
+            "volgorde":     -1,
+            "besteld":      qty,
+            "sap":          0,
+            "voorraad":     None,
+            "op_voorraad":  True,
         })
 
     # ── Fictieve pad-codes voor secties zonder herkenbaar getal ───────────────
@@ -642,3 +669,81 @@ def lees_padcodes_xlsx(bestand_bytes) -> dict:
         pad_codes[ean] = str(pad_raw).strip()
 
     return pad_codes
+
+
+# ─── Padcodes per sectie inlezen ──────────────────────────────────────────────
+def lees_sectie_padcodes_xlsx(bestand_bytes) -> dict:
+    """
+    Leest een Excel met kolommen Sectie en Pad_code (bijv. de export die de app
+    zelf aanbiedt via 'Genereer secties-overzicht').
+    Geeft {sectie: pad_code} terug. Regels met een lege Pad_code worden overgeslagen
+    zodat je het bestand gerust in delen kunt invullen en tussentijds uploaden.
+    """
+    buf = io.BytesIO(bestand_bytes)
+    wb  = openpyxl.load_workbook(buf, data_only=True)
+    ws  = wb.active
+
+    headers = {}
+    for rij in ws.iter_rows(min_row=1, max_row=5, values_only=True):
+        if any(v is not None for v in rij):
+            for ci, h in enumerate(rij):
+                if h:
+                    headers[str(h).strip().lower().replace(" ", "_")] = ci
+            break
+
+    def kolom(opties):
+        for n in opties:
+            if n in headers:
+                return headers[n]
+        return None
+
+    ci_sectie = kolom(["sectie", "groepsnaam", "artikelgroep"])
+    ci_pad    = kolom(["pad_code", "padcode", "pad", "pad_nr", "pad_nummer"])
+
+    if ci_sectie is None or ci_pad is None:
+        return {}
+
+    sectie_pad = {}
+    for rij in ws.iter_rows(min_row=2, values_only=True):
+        if not any(rij):
+            continue
+        sectie_raw = rij[ci_sectie]
+        pad_raw    = rij[ci_pad]
+        if not sectie_raw or pad_raw is None or str(pad_raw).strip() == "":
+            continue
+        sectie = str(sectie_raw).strip()
+        pad    = _normalize_pad_code(str(pad_raw).strip()) or str(pad_raw).strip()
+        sectie_pad[sectie] = pad
+
+    return sectie_pad
+
+
+def bouw_sectie_overzicht_xlsx(secties: list) -> bytes:
+    """
+    Genereert een Excel met alle bekende secties en hun huidige pad-code, zodat
+    Wouter/Dave per sectie het echte pad-nummer kan invullen (i.p.v. per EAN).
+    secties: [{"sectie": str, "pad_code": str, "fictief": bool}]
+    Kolom 'Pad_code' is leeg voor secties die nog een fictieve pad hebben
+    (invullen = overschrijft de fictieve waarde bij upload); secties met een
+    al bekend/echt getal in de naam staan alvast correct ingevuld.
+    Vul de kolom met een kaal padnummer in, bijv. '7' of '15A' — niet 'Pad 7'.
+    """
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Secties"
+    ws.append(["Sectie", "Pad_code", "Toelichting"])
+    for rij in ws[1]:
+        rij.font = rij.font.copy(bold=True)
+    for s in secties:
+        toelichting = (
+            "TIJDELIJK fictief — vul het echte pad-nummer in"
+            if s.get("fictief") else ""
+        )
+        pad_waarde = "" if s.get("fictief") else s.get("pad_code", "")
+        ws.append([s["sectie"], pad_waarde, toelichting])
+    ws.column_dimensions["A"].width = 28
+    ws.column_dimensions["B"].width = 12
+    ws.column_dimensions["C"].width = 45
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
