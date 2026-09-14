@@ -1,0 +1,765 @@
+"""
+Artikelinvoer — Lion Beddenshop
+Beheer artikelen in Supabase (als pagina binnen de bestelapp).
+"""
+import re
+import streamlit as st
+import requests
+import pandas as pd
+from urllib.parse import quote
+
+from utils.genereer import (
+    lees_sectie_padcodes_xlsx, bouw_sectie_overzicht_xlsx, lees_padcodes_xlsx,
+)
+# Alleen geïmporteerd om de cache van de ANDERE database-laag (supabase-py, gebruikt
+# door 2_Beheer.py) te legen na een wijziging hier — deze pagina praat zelf verder
+# uitsluitend via requests/REST, niet via utils.database, om twee databasetoegangs-
+# methoden niet door elkaar te gebruiken. Zonder deze clear zou 2_Beheer.py tot een
+# uur lang (cache ttl) piklijsten kunnen genereren met de OUDE padcodes.
+from utils.database import laad_artikelen as _laad_artikelen_supabase
+
+# ── Auth check — alleen beheer (Wouter) mag hier komen ───────────────────────
+if not st.session_state.get("ingelogd_als"):
+    st.switch_page("app.py")
+if st.session_state.get("rol") != "beheerder":
+    st.error("🔒  Geen toegang. Deze pagina is alleen voor beheerders.")
+    st.stop()
+
+# ── Configuratie ──────────────────────────────────────────────────────────────
+SUPABASE_URL = st.secrets["SUPABASE_URL"]
+SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
+
+HDR_GET = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
+HDR_WRITE = {
+    **HDR_GET,
+    "Content-Type": "application/json",
+    "Prefer": "return=representation",
+}
+
+# ── Supabase functies ─────────────────────────────────────────────────────────
+@st.cache_data(ttl=30, show_spinner=False)
+def laad_alle_artikelen():
+    alle = []
+    offset = 0
+    while True:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/articles"
+            f"?select=ean,artikel,sectie,pad_code,volgorde&limit=1000&offset={offset}",
+            headers=HDR_GET,
+        )
+        r.raise_for_status()
+        data = r.json()
+        if not data:
+            break
+        alle.extend(data)
+        offset += len(data)
+        if len(data) < 1000:
+            break
+    return alle
+
+def patch_artikelen(filter_str: str, velden: dict):
+    return requests.patch(
+        f"{SUPABASE_URL}/rest/v1/articles?{filter_str}",
+        headers=HDR_WRITE,
+        json=velden,
+    )
+
+def insert_batch(batch: list):
+    return requests.post(
+        f"{SUPABASE_URL}/rest/v1/articles",
+        headers=HDR_WRITE,
+        json=batch,
+    )
+
+def delete_artikel(ean: str):
+    return requests.delete(
+        f"{SUPABASE_URL}/rest/v1/articles?ean=eq.{quote(ean, safe='')}",
+        headers=HDR_WRITE,
+    )
+
+SECTIE_MARKER_PREFIX = "__SECTIE__"
+
+def upsert_sectie_marker(sectie: str, pad_code: str):
+    """
+    Zet (of werkt bij) een sectie-marker-rijtje: een artikel-rij met een
+    gereserveerd nep-EAN (__SECTIE__<sectie>) die alleen dient om de pad-code
+    van een hele sectie vast te leggen — ook voor artikelen die nog niet los
+    in de catalogus staan (bijv. artikelen die alleen via een SAP-export bekend
+    zijn). genereer.py's bouw_artikellijst() gebruikt dit rijtje automatisch
+    als sectie-fallback bij het genereren van piklijsten.
+    """
+    return requests.post(
+        f"{SUPABASE_URL}/rest/v1/articles?on_conflict=ean",
+        headers={**HDR_WRITE, "Prefer": "resolution=merge-duplicates,return=representation"},
+        json=[{
+            "ean":      f"{SECTIE_MARKER_PREFIX}{sectie}",
+            "artikel":  "(sectie-marker — niet verwijderen)",
+            "sectie":   sectie,
+            "pad_code": pad_code,
+            "volgorde": 9999,
+        }],
+    )
+
+def update_pad_codes_by_sectie(sectie_pad: dict) -> int:
+    """
+    Werkt de pad-code bij voor een HELE sectie in één keer (i.p.v. per EAN):
+    - patcht alle bestaande artikelen met deze sectie
+    - zet daarnaast een sectie-marker-rijtje (zie upsert_sectie_marker), zodat
+      de pad ook geldt voor artikelen die nog niet los in de catalogus staan.
+    sectie_pad: {sectie_naam: pad_code}. Geeft het aantal bijgewerkte secties terug.
+    """
+    bijgewerkt = 0
+    for sectie, pad in sectie_pad.items():
+        if not sectie or not pad:
+            continue
+        patch_artikelen(f"sectie=eq.{quote(sectie, safe='')}", {"pad_code": pad})
+        upsert_sectie_marker(sectie, pad)
+        bijgewerkt += 1
+    return bijgewerkt
+
+@st.cache_data(ttl=30, show_spinner=False)
+def laad_sap_groepsnamen() -> set:
+    """Alle unieke Groepsnamen uit sap_data, over alle winkels heen (voor het secties-overzicht)."""
+    r = requests.get(
+        f"{SUPABASE_URL}/rest/v1/sap_data?select=groepsnaam&groepsnaam=not.is.null",
+        headers=HDR_GET,
+    )
+    r.raise_for_status()
+    return {row["groepsnaam"].strip() for row in r.json() if row.get("groepsnaam", "").strip()}
+
+# ── Hulpfuncties ──────────────────────────────────────────────────────────────
+def pad_sort_key(x):
+    m = re.match(r'^(\d+)([A-Za-z]*)$', str(x).strip())
+    if m:
+        return (int(m.group(1)), m.group(2).upper())
+    return (9999, str(x))
+
+def volgorde_uit_sectie(sectie: str) -> int:
+    try:
+        return int(sectie.strip().split()[0].lstrip("0") or "0")
+    except Exception:
+        return 0
+
+def parse_excel_plak(tekst: str) -> list[dict]:
+    rijen = []
+    for regel in tekst.strip().splitlines():
+        delen = regel.split("\t")
+        if len(delen) < 2:
+            delen = regel.split(",", 1)
+        if len(delen) < 2:
+            continue
+        ean_raw = delen[0].strip().strip('"')
+        artikel = delen[1].strip().strip('"')
+        if not ean_raw or not artikel:
+            continue
+        try:
+            ean = str(int(float(ean_raw.replace(",", "."))))
+        except Exception:
+            ean = ean_raw
+        rijen.append({"ean": ean, "artikel": artikel})
+    return rijen
+
+# ── Pagina ────────────────────────────────────────────────────────────────────
+st.title("🛏  Artikelinvoer")
+col_info, col_btn = st.columns([6, 1])
+with col_btn:
+    if st.button("↻  Herladen", use_container_width=True):
+        st.cache_data.clear()
+        for k in list(st.session_state.keys()):
+            if k.startswith("preview") or k.startswith("te_invoegen"):
+                del st.session_state[k]
+        st.rerun()
+
+# ── Data laden ────────────────────────────────────────────────────────────────
+with st.spinner("Verbinden met Supabase..."):
+    try:
+        artikelen = laad_alle_artikelen()
+    except Exception as e:
+        st.error(f"Kon geen verbinding maken met Supabase: {e}")
+        st.stop()
+
+bestaande_eans = {a["ean"] for a in artikelen}
+secties_dict: dict[str, str] = {}
+for a in artikelen:
+    s = (a.get("sectie") or "").strip()
+    p = (a.get("pad_code") or "").strip()
+    if s and s not in secties_dict:
+        secties_dict[s] = p
+
+pad_codes = sorted(
+    {str(a.get("pad_code") or "").strip() for a in artikelen if a.get("pad_code")},
+    key=pad_sort_key,
+)
+
+with col_info:
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Artikelen in database", len(artikelen))
+    c2.metric("Secties", len(secties_dict))
+    c3.metric("Paden", len(pad_codes))
+
+st.divider()
+
+# ── Tabs ──────────────────────────────────────────────────────────────────────
+tab1, tab2, tab3 = st.tabs([
+    "➕  Artikelen invoeren",
+    "✏️  Padnummer wijzigen",
+    "📝  Artikelen beheren",
+])
+
+# ════════════════════════════════════════════════════════════════════════════
+# TAB 1 — INVOEREN
+# ════════════════════════════════════════════════════════════════════════════
+with tab1:
+    st.markdown("### 1.  Sectie kiezen of aanmaken")
+    sectie_opties = ["── Nieuwe sectie aanmaken ──"] + sorted(secties_dict.keys())
+    sectie_keuze = st.selectbox("Sectie", sectie_opties, key="inv_sectie_keuze")
+    if "Nieuwe sectie" in sectie_keuze:
+        sectie = st.text_input("Naam nieuwe sectie", placeholder="bijv. 35 BADMATTEN",
+                               key="inv_nieuwe_sectie").strip()
+    else:
+        sectie = sectie_keuze
+
+    st.markdown("### 2.  Padnummer kiezen of aanmaken")
+    pad_opties = ["── Nieuw pad aanmaken ──"] + pad_codes
+    default_pad_idx = 0
+    if sectie in secties_dict and secties_dict[sectie] in pad_opties:
+        default_pad_idx = pad_opties.index(secties_dict[sectie])
+    pad_keuze = st.selectbox("Padnummer", pad_opties, index=default_pad_idx, key="inv_pad_keuze")
+    if "Nieuw pad" in pad_keuze:
+        pad = st.text_input("Nieuw padnummer", placeholder="bijv. 26", key="inv_nieuw_pad").strip()
+    else:
+        pad = pad_keuze
+
+    if sectie and pad and "Nieuwe" not in str(sectie) and "Nieuw" not in str(pad):
+        st.info(f"Artikelen worden geplaatst in sectie **{sectie}** → pad **{pad}**")
+
+    st.markdown("### 3.  Artikelen plakken vanuit Excel")
+    st.caption("Selecteer in Excel: **Kolom A = EAN-code**  |  **Kolom B = Artikelnaam**  — Ctrl+C en hieronder plakken")
+    plak_tekst = st.text_area(
+        "Geplakte artikelen",
+        height=160,
+        key="inv_plak",
+        placeholder="8712345678901\tCLAUDIA SINGLE THERMO\n8712345678902\tCLAUDIA 2-PERSOONS WIT",
+        label_visibility="collapsed",
+    )
+    col_check, col_wis = st.columns([2, 1])
+    with col_check:
+        controleer = st.button("🔍  Controleer & preview", type="primary", use_container_width=True)
+    with col_wis:
+        if st.button("🗑  Wis", use_container_width=True):
+            # FIX: del in plaats van = "" — widget is al gerenderd, directe assignment gooit
+            # StreamlitWidgetAlreadyInstantiatedError. Del reset de waarde voor de volgende run.
+            st.session_state.pop("inv_plak", None)
+            st.session_state.pop("preview_data", None)
+            st.session_state.pop("te_invoegen_data", None)
+            st.rerun()
+
+    if controleer:
+        fout = None
+        if not sectie or "Nieuwe sectie" in sectie:
+            fout = "Voer een sectienaam in."
+        elif not pad or "Nieuw pad" in pad:
+            fout = "Voer een padnummer in."
+        elif not plak_tekst.strip():
+            fout = "Plak eerst artikelen in het tekstvak."
+        if fout:
+            st.error(fout)
+        else:
+            rijen = parse_excel_plak(plak_tekst)
+            if not rijen:
+                st.error("Geen geldige rijen gevonden. Zorg dat EAN en naam gescheiden zijn door een tab.")
+            else:
+                preview = []
+                te_invoegen = []
+                for r in rijen:
+                    if r["ean"] in bestaande_eans:
+                        preview.append({"Status": "⚠️  Al aanwezig", "EAN": r["ean"], "Artikel": r["artikel"]})
+                    else:
+                        preview.append({"Status": "✅  Nieuw", "EAN": r["ean"], "Artikel": r["artikel"]})
+                        te_invoegen.append({
+                            "ean":      r["ean"],
+                            "artikel":  r["artikel"],
+                            "sectie":   sectie,
+                            "pad_code": pad,
+                            "volgorde": volgorde_uit_sectie(sectie),
+                        })
+                st.session_state["preview_data"]    = preview
+                st.session_state["te_invoegen_data"] = te_invoegen
+                st.session_state["inv_sectie_label"] = sectie
+                st.session_state["inv_pad_label"]    = pad
+
+    if "preview_data" in st.session_state:
+        preview  = st.session_state["preview_data"]
+        te_inv   = st.session_state["te_invoegen_data"]
+        n_nieuw  = sum(1 for r in preview if "Nieuw" in r["Status"])
+        n_dubbel = sum(1 for r in preview if "aanwezig" in r["Status"])
+        st.markdown("### 4.  Preview")
+        col_n, col_d = st.columns(2)
+        col_n.success(f"✅  {n_nieuw} nieuw")
+        col_d.warning(f"⚠️  {n_dubbel} overgeslagen (al aanwezig)")
+        df = pd.DataFrame(preview)
+        def kleur(rij):
+            if "Nieuw" in rij["Status"]:
+                return ["background-color:#c8f7c5; color:#1a1a1a"] * len(rij)
+            return ["background-color:#ffc8c8; color:#1a1a1a"] * len(rij)
+        st.dataframe(df.style.apply(kleur, axis=1), use_container_width=True, hide_index=True)
+        if n_nieuw > 0:
+            sectie_lbl = st.session_state.get("inv_sectie_label", "")
+            pad_lbl    = st.session_state.get("inv_pad_label", "")
+            if st.button(
+                f"⬆️   Voeg {n_nieuw} nieuwe artikelen toe  →  sectie '{sectie_lbl}'  /  pad {pad_lbl}",
+                type="primary",
+                use_container_width=True,
+            ):
+                BATCH = 50
+                ingevoegd = fouten = 0
+                prog = st.progress(0, text="Uploaden...")
+                for i in range(0, len(te_inv), BATCH):
+                    batch = te_inv[i : i + BATCH]
+                    resp = insert_batch(batch)
+                    if resp.status_code in (200, 201):
+                        ingevoegd += len(batch)
+                    else:
+                        fouten += len(batch)
+                        st.warning(f"Batch fout {resp.status_code}: {resp.text[:200]}")
+                    prog.progress(min((i + BATCH) / len(te_inv), 1.0))
+                prog.empty()
+                if fouten == 0:
+                    st.success(f"✅  {ingevoegd} artikelen succesvol toegevoegd aan de database!")
+                else:
+                    st.warning(f"{ingevoegd} ingevoegd  |  {fouten} mislukt.")
+                del st.session_state["preview_data"]
+                del st.session_state["te_invoegen_data"]
+                st.cache_data.clear()
+                st.rerun()
+        else:
+            st.info("Alle artikelen staan al in de database — niets toe te voegen.")
+
+# ════════════════════════════════════════════════════════════════════════════
+# TAB 2 — WIJZIGEN
+# ════════════════════════════════════════════════════════════════════════════
+with tab2:
+    # ── Padcodes per sectie (aanbevolen) ────────────────────────────────────────
+    st.markdown("### 🗺️ Padcodes per sectie (aanbevolen)")
+    st.caption(
+        "Werkt de pad in één keer bij voor een hele sectie — geldt ook voor artikelen "
+        "die nog niet los in de catalogus staan (bijv. artikelen die alleen via een "
+        "SAP-export bekend zijn)."
+    )
+    with st.expander("📋 Secties-overzicht downloaden / uploaden", expanded=True):
+        st.markdown("""
+1. Download het secties-overzicht hieronder.
+2. Vul de kolom **Pad_code** in met het echte padnummer (bijv. `7` of `15A`) —
+   niet `Pad 7`, gewoon het kale nummer.
+3. Upload het bestand terug. Alle artikelen in die sectie krijgen direct de nieuwe pad,
+   ook artikelen die nog niet los in de catalogus staan.
+""")
+        if st.button("📥 Genereer secties-overzicht", use_container_width=True):
+            bekende_secties = {}  # sectie -> (pad_code, fictief)
+            for s, p in secties_dict.items():
+                if not s.startswith("(sectie-marker"):
+                    bekende_secties.setdefault(s, (p, False))
+            try:
+                for s in laad_sap_groepsnamen():
+                    if s not in bekende_secties:
+                        bekende_secties[s] = ("", True)
+            except Exception as e:
+                st.warning(f"Kon SAP-groepsnamen niet ophalen (secties-overzicht mist mogelijk enkele SAP-only secties): {e}")
+
+            secties_lijst = [
+                {"sectie": s, "pad_code": pad, "fictief": (pad == "")}
+                for s, (pad, _) in sorted(bekende_secties.items())
+            ]
+            st.session_state["secties_overzicht_xlsx"] = bouw_sectie_overzicht_xlsx(secties_lijst)
+            st.success(f"✅ {len(secties_lijst)} secties gevonden.")
+
+        if "secties_overzicht_xlsx" in st.session_state:
+            st.download_button(
+                "⬇️ Download secties-overzicht.xlsx",
+                data=st.session_state["secties_overzicht_xlsx"],
+                file_name="secties_overzicht.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+
+        sectie_bestand = st.file_uploader(
+            "Ingevuld secties-bestand uploaden (.xlsx)",
+            type=["xlsx"],
+            key="sectie_padcode_upload",
+        )
+        if sectie_bestand:
+            if st.button("🗺️ Verwerk padcodes per sectie", type="primary"):
+                sectie_pad = lees_sectie_padcodes_xlsx(sectie_bestand.read())
+                if not sectie_pad:
+                    st.error("❌ Geen (ingevulde) Sectie/Pad_code-combinaties gevonden.")
+                else:
+                    bijgewerkt = update_pad_codes_by_sectie(sectie_pad)
+                    st.cache_data.clear()               # eigen cache (laad_alle_artikelen)
+                    _laad_artikelen_supabase.clear()     # cache van 2_Beheer.py's databaselaag
+                    st.success(f"✅ {bijgewerkt} secties bijgewerkt met een nieuw padnummer.")
+                    st.rerun()
+
+    # ── Padcodes per EAN (uitzondering) ─────────────────────────────────────────
+    with st.expander("📋 Padcodes per EAN (uitzondering — los .xlsx-bestand)", expanded=False):
+        st.caption(
+            "Voor losse correcties op individuele artikelen via een apart bestand "
+            "(kolommen **EAN** en **Pad_code**). Voor de meeste gevallen is de "
+            "'Padnummer wijzigen voor één artikel'-tool verderop op deze pagina simpeler."
+        )
+        padcode_bestand = st.file_uploader(
+            "Selecteer padcodes-bestand (.xlsx)",
+            type=["xlsx"],
+            key="padcode_upload_ean",
+        )
+        if padcode_bestand:
+            if st.button("🗺️ Verwerk padcodes per EAN", type="primary", key="btn_padcode_ean"):
+                pad_codes_upload = lees_padcodes_xlsx(padcode_bestand.read())
+                if not pad_codes_upload:
+                    st.error("❌ Geen padcodes gevonden. Controleer of de Excel kolommen 'EAN' en 'Pad_code' bevat.")
+                else:
+                    bijgewerkt_n = fouten_n = 0
+                    for ean_u, pad_u in pad_codes_upload.items():
+                        if not pad_u:
+                            continue
+                        resp = patch_artikelen(f"ean=eq.{quote(ean_u, safe='')}", {"pad_code": pad_u})
+                        if resp.status_code in (200, 204):
+                            bijgewerkt_n += 1
+                        else:
+                            fouten_n += 1
+                    st.cache_data.clear()
+                    _laad_artikelen_supabase.clear()
+                    if fouten_n == 0:
+                        st.success(f"✅ {bijgewerkt_n} artikelen bijgewerkt met padcodes.")
+                    else:
+                        st.warning(f"{bijgewerkt_n} bijgewerkt, {fouten_n} mislukt.")
+                    st.rerun()
+
+    st.divider()
+
+    # ── Export ───────────────────────────────────────────────────────────────
+    import io as _io
+    st.markdown("### 📥 Exporteer artikelen als Excel")
+    st.caption(
+        "Download alle artikelen met hun huidige padnummer. "
+        "Vul de kolom **Pad** in, sla op en laad het bestand hieronder terug."
+    )
+    df_export = pd.DataFrame([
+        {
+            "EAN":     a.get("ean", ""),
+            "Artikel": a.get("artikel", ""),
+            "Sectie":  a.get("sectie", ""),
+            "Pad":     a.get("pad_code", "") or "",
+        }
+        for a in sorted(
+            artikelen,
+            key=lambda x: (
+                (x.get("sectie") or "").upper(),
+                (x.get("artikel") or "").upper(),
+            ),
+        )
+    ])
+    _buf = _io.BytesIO()
+    with pd.ExcelWriter(_buf, engine="openpyxl") as _writer:
+        df_export.to_excel(_writer, index=False, sheet_name="Artikelen")
+    _buf.seek(0)
+    st.download_button(
+        label=f"⬇️  Download Excel  ({len(artikelen)} artikelen)",
+        data=_buf.getvalue(),
+        file_name="lion_artikelen_padnummers.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        type="primary",
+        use_container_width=True,
+        key="dl_export_excel",
+    )
+
+    st.divider()
+
+    # ── Import ────────────────────────────────────────────────────────────────
+    st.markdown("### 📤 Importeer ingevulde padnummers")
+    st.caption(
+        "Upload het bewerkte Excel-bestand. "
+        "Alleen de kolom **Pad** wordt bijgewerkt op basis van de EAN-code. "
+        "Rijen met een lege Pad-kolom worden overgeslagen."
+    )
+    upload_pad = st.file_uploader(
+        "Selecteer Excel-bestand (.xlsx)",
+        type=["xlsx"],
+        key="pad_upload",
+    )
+    if upload_pad:
+        try:
+            df_imp = pd.read_excel(upload_pad, dtype=str).fillna("")
+            vereist = {"EAN", "Pad"}
+            if not vereist.issubset(set(df_imp.columns)):
+                st.error(f"Het bestand moet minimaal de kolommen {vereist} bevatten.")
+            else:
+                te_verwerken = df_imp[
+                    df_imp["EAN"].str.strip().ne("") & df_imp["Pad"].str.strip().ne("")
+                ].copy()
+                overgeslagen_n = len(df_imp) - len(te_verwerken)
+                st.caption(
+                    f"**{len(te_verwerken)}** rijen worden bijgewerkt  ·  "
+                    f"{overgeslagen_n} rijen overgeslagen (leeg EAN of Pad)."
+                )
+                st.dataframe(
+                    te_verwerken[["EAN", "Artikel", "Sectie", "Pad"]].head(10)
+                    if "Artikel" in te_verwerken.columns
+                    else te_verwerken[["EAN", "Pad"]].head(10),
+                    hide_index=True,
+                    use_container_width=True,
+                )
+                if st.button(
+                    f"⬆️  Importeer padnummers ({len(te_verwerken)} rijen)",
+                    type="primary",
+                    use_container_width=True,
+                    key="btn_import_pad",
+                ):
+                    from collections import defaultdict as _dd
+                    pad_groepen: dict = _dd(list)
+                    for _, rij in te_verwerken.iterrows():
+                        pad_groepen[rij["Pad"].strip()].append(rij["EAN"].strip())
+
+                    bijgewerkt = fouten_imp = 0
+                    prog = st.progress(0, text="Importeren...")
+                    totaal = len(pad_groepen)
+                    for idx, (pad_val, eans) in enumerate(pad_groepen.items()):
+                        # Batch per unieke padwaarde → één PATCH-request per pad
+                        ean_lijst = ",".join(eans)
+                        resp = patch_artikelen(
+                            f"ean=in.({ean_lijst})",
+                            {"pad_code": pad_val},
+                        )
+                        if resp.status_code in (200, 204):
+                            bijgewerkt += len(eans)
+                        else:
+                            fouten_imp += len(eans)
+                            st.warning(f"Fout pad '{pad_val}': {resp.text[:150]}")
+                        prog.progress((idx + 1) / totaal)
+                    prog.empty()
+                    if fouten_imp == 0:
+                        st.success(
+                            f"✅  {bijgewerkt} artikel(en) bijgewerkt  ·  "
+                            f"{overgeslagen_n} rijen overgeslagen."
+                        )
+                    else:
+                        st.warning(
+                            f"{bijgewerkt} bijgewerkt  |  {fouten_imp} mislukt  |  "
+                            f"{overgeslagen_n} overgeslagen."
+                        )
+                    st.cache_data.clear()
+                    st.rerun()
+        except Exception as e:
+            st.error(f"Kan bestand niet lezen: {e}")
+
+    st.divider()
+
+    # ── Handmatig wijzigen ────────────────────────────────────────────────────
+    st.markdown("### Padnummer wijzigen voor een volledige sectie")
+    wijk_sectie = st.selectbox("Sectie", sorted(secties_dict.keys()), key="wijk_sectie")
+    if wijk_sectie:
+        huidig_pad   = secties_dict.get(wijk_sectie, "—")
+        aantal_art   = sum(1 for a in artikelen if a.get("sectie") == wijk_sectie)
+        col_a, col_b = st.columns(2)
+        col_a.info(f"Huidig padnummer: **{huidig_pad}**")
+        col_b.info(f"Artikelen in deze sectie: **{aantal_art}**")
+    wijk_nieuw_pad = st.text_input("Nieuw padnummer", key="wijk_nieuw_pad", placeholder="bijv. 14")
+    if st.button("✅  Wijzig padnummer voor deze sectie", type="primary"):
+        if not wijk_sectie:
+            st.error("Selecteer een sectie.")
+        elif not wijk_nieuw_pad.strip():
+            st.error("Voer een nieuw padnummer in.")
+        else:
+            with st.spinner("Bijwerken..."):
+                resp = patch_artikelen(
+                    f"sectie=eq.{quote(wijk_sectie, safe='')}",
+                    {"pad_code": wijk_nieuw_pad.strip()},
+                )
+            if resp.status_code in (200, 204):
+                try:
+                    count = len(resp.json())
+                except Exception:
+                    count = aantal_art
+                st.success(f"✅  {count} artikelen in '{wijk_sectie}' → pad {wijk_nieuw_pad.strip()}")
+                st.cache_data.clear()
+                st.rerun()
+            else:
+                st.error(f"Fout {resp.status_code}: {resp.text[:300]}")
+
+    st.divider()
+    st.markdown("### Padnummer wijzigen voor één artikel (op EAN-code)")
+    ean_input = st.text_input("EAN-code", key="ean_input", placeholder="bijv. 8712345678901")
+    gevonden = None
+    if ean_input.strip():
+        gevonden = next((a for a in artikelen if a.get("ean") == ean_input.strip()), None)
+        if gevonden:
+            st.info(
+                f"📦  **{gevonden['artikel']}**  \n"
+                f"Sectie: {gevonden['sectie']}  |  Huidig pad: **{gevonden['pad_code']}**"
+            )
+        else:
+            st.warning("EAN-code niet gevonden in de database.")
+    ean_nieuw_pad = st.text_input("Nieuw padnummer", key="ean_nieuw_pad", placeholder="bijv. 14")
+    if st.button("✅  Wijzig padnummer voor dit artikel", type="primary", key="btn_ean"):
+        if not ean_input.strip():
+            st.error("Voer een EAN-code in.")
+        elif not gevonden:
+            st.error("EAN niet gevonden — kan niet wijzigen.")
+        elif not ean_nieuw_pad.strip():
+            st.error("Voer een nieuw padnummer in.")
+        else:
+            with st.spinner("Bijwerken..."):
+                resp = patch_artikelen(
+                    f"ean=eq.{quote(ean_input.strip(), safe='')}",
+                    {"pad_code": ean_nieuw_pad.strip()},
+                )
+            if resp.status_code in (200, 204):
+                st.success(f"✅  EAN {ean_input.strip()} → pad {ean_nieuw_pad.strip()}")
+                st.cache_data.clear()
+                st.rerun()
+            else:
+                st.error(f"Fout {resp.status_code}: {resp.text[:300]}")
+
+# ════════════════════════════════════════════════════════════════════════════
+# TAB 3 — BEHEREN (bewerken / verwijderen)
+# ════════════════════════════════════════════════════════════════════════════
+with tab3:
+    st.markdown("### Artikelen bewerken of verwijderen")
+    st.caption(
+        "Kies een sectie, pas artikelnaam, sectie of pad direct aan in de tabel, "
+        "en vink aan wat je wilt verwijderen. Sla daarna op."
+    )
+    col_f1, col_f2 = st.columns([2, 3])
+    with col_f1:
+        sectie_filter = st.selectbox(
+            "Filter op sectie:",
+            ["— Alle secties —"] + sorted(secties_dict.keys()),
+            key="beh_sectie_filter",
+        )
+    with col_f2:
+        zoek_beh = st.text_input(
+            "🔍 Zoek op artikel of EAN:",
+            key="beh_zoek",
+            placeholder="Typ om te filteren…",
+        )
+    gefilterd_beh = list(artikelen)
+    if sectie_filter != "— Alle secties —":
+        gefilterd_beh = [a for a in gefilterd_beh if a.get("sectie") == sectie_filter]
+    if zoek_beh.strip():
+        term = zoek_beh.strip().lower()
+        gefilterd_beh = [
+            a for a in gefilterd_beh
+            if term in (a.get("artikel") or "").lower()
+            or term in (a.get("ean") or "").lower()
+        ]
+    gefilterd_beh.sort(key=lambda a: (
+        (a.get("sectie") or "").lower(),
+        (a.get("artikel") or "").lower(),
+    ))
+    n_getoond = len(gefilterd_beh)
+    st.caption(f"**{n_getoond} artikel(en)** weergegeven.")
+    if not gefilterd_beh:
+        st.info("Geen artikelen gevonden met de huidige filter.")
+    else:
+        selecteer_alles = st.checkbox(
+            f"Selecteer alles ({n_getoond} artikelen)",
+            key="beh_selecteer_alles",
+        )
+        origineel_beh = {a["ean"]: a for a in gefilterd_beh}
+        df_beh = pd.DataFrame([
+            {
+                "🗑": selecteer_alles,
+                "EAN": a["ean"],
+                "Artikel": a.get("artikel") or "",
+                "Sectie": a.get("sectie") or "",
+                "Pad": a.get("pad_code") or "",
+            }
+            for a in gefilterd_beh
+        ])
+        editor_key = f"beh_editor_{selecteer_alles}_{sectie_filter}_{zoek_beh}"
+        bewerkt_df = st.data_editor(
+            df_beh,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "🗑": st.column_config.CheckboxColumn("🗑", help="Vink aan om te verwijderen", width="small"),
+                "EAN": st.column_config.TextColumn("EAN", disabled=True, width="medium"),
+                "Artikel": st.column_config.TextColumn("Artikel", width="large"),
+                "Sectie": st.column_config.TextColumn("Sectie", width="medium"),
+                "Pad": st.column_config.TextColumn("Pad", width="small"),
+            },
+            num_rows="fixed",
+            key=editor_key,
+        )
+        te_verwijderen = bewerkt_df[bewerkt_df["🗑"] == True]["EAN"].tolist()
+        col_sla, col_del = st.columns(2)
+        with col_sla:
+            if st.button("💾 Sla wijzigingen op", type="primary", use_container_width=True):
+                gewijzigd = 0
+                fouten_w = 0
+                for _, rij in bewerkt_df.iterrows():
+                    ean = rij["EAN"]
+                    oud = origineel_beh.get(ean, {})
+                    nieuw_artikel = rij["Artikel"].strip()
+                    nieuw_sectie  = rij["Sectie"].strip()
+                    nieuw_pad     = rij["Pad"].strip()
+                    if (
+                        nieuw_artikel != (oud.get("artikel") or "").strip()
+                        or nieuw_sectie  != (oud.get("sectie")   or "").strip()
+                        or nieuw_pad     != (oud.get("pad_code") or "").strip()
+                    ):
+                        resp = patch_artikelen(
+                            f"ean=eq.{quote(ean, safe='')}",
+                            {
+                                "artikel":  nieuw_artikel,
+                                "sectie":   nieuw_sectie,
+                                "pad_code": nieuw_pad,
+                                "volgorde": volgorde_uit_sectie(nieuw_sectie),
+                            },
+                        )
+                        if resp.status_code in (200, 204):
+                            gewijzigd += 1
+                        else:
+                            fouten_w += 1
+                            st.warning(f"Fout bij EAN {ean}: {resp.text[:150]}")
+                if fouten_w == 0 and gewijzigd > 0:
+                    st.success(f"✅ {gewijzigd} artikel(en) bijgewerkt.")
+                    st.cache_data.clear()
+                    st.rerun()
+                elif gewijzigd == 0 and fouten_w == 0:
+                    st.info("Geen wijzigingen gevonden.")
+                else:
+                    st.warning(f"{gewijzigd} bijgewerkt, {fouten_w} mislukt.")
+                    st.cache_data.clear()
+                    st.rerun()
+        with col_del:
+            verwijder_label = (
+                f"🗑️ Verwijder geselecteerde ({len(te_verwijderen)})"
+                if te_verwijderen
+                else "🗑️ Verwijder geselecteerde"
+            )
+            if st.button(
+                verwijder_label,
+                use_container_width=True,
+                disabled=not te_verwijderen,
+                key="beh_verwijder_btn",
+            ):
+                verwijderd = 0
+                fouten_d = 0
+                for ean in te_verwijderen:
+                    resp = delete_artikel(ean)
+                    if resp.status_code in (200, 204):
+                        verwijderd += 1
+                    else:
+                        fouten_d += 1
+                        st.warning(f"Fout bij verwijderen EAN {ean}: {resp.text[:150]}")
+                if verwijderd > 0:
+                    st.success(f"✅ {verwijderd} artikel(en) verwijderd.")
+                else:
+                    st.error("Verwijderen mislukt.")
+                st.cache_data.clear()
+                st.rerun()
+        if te_verwijderen:
+            st.warning(
+                f"⚠️ **{len(te_verwijderen)} artikel(en) geselecteerd voor verwijdering** — "
+                "klik 'Verwijder geselecteerde' om te bevestigen. Dit kan niet ongedaan worden gemaakt."
+            )

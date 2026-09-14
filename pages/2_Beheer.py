@@ -20,8 +20,7 @@ if st.session_state.get("rol") != "beheerder":
 from utils.database import (
     laad_artikelen, laad_alle_bestellingen, laad_alle_dbo_bestellingen,
     laad_alle_sap, sla_sap_op, bestelling_status,
-    reset_winkel_bestellingen, update_pad_codes,
-    update_pad_codes_by_sectie,
+    reset_winkel_bestellingen,
     sla_piklijst_correcties_op, laad_piklijst_correcties,
     sla_definitief_op, laad_winkels_met_correcties,
     sla_order_history_op, update_order_status, laad_order_history,
@@ -29,8 +28,7 @@ from utils.database import (
 )
 from utils.genereer import (
     bouw_artikellijst, schrijf_piklijst_pdf, schrijf_paklijst_pdf,
-    lees_sap_xlsx, lees_padcodes_xlsx, lees_sectie_padcodes_xlsx,
-    bouw_sectie_overzicht_xlsx, maak_zip,
+    lees_sap_xlsx, maak_zip,
 )
 
 # ─── Header ───────────────────────────────────────────────────────────────────
@@ -92,6 +90,7 @@ st.markdown("---")
 # ─── SAP uploaden ─────────────────────────────────────────────────────────────
 st.subheader("📥 SAP-exports uploaden")
 st.caption("Upload de SAP-exports per winkel. Het systeem herkent de winkelnaam automatisch.")
+st.caption("💡 Padcodes (per sectie of per EAN) beheer je voortaan op de pagina **Artikelinvoer**.")
 sap_bestanden = st.file_uploader(
     "Selecteer SAP-bestanden (.xlsx)",
     type=["xlsx"],
@@ -114,93 +113,6 @@ if sap_bestanden:
             st.info(f"{succes} SAP-bestand(en) verwerkt.")
 st.markdown("---")
 
-# ─── Padcodes uploaden ────────────────────────────────────────────────────────
-st.subheader("🗺️ Padcodes uploaden")
-st.caption(
-    "Werk padnummers bij **per sectie** (aanbevolen — geldt meteen voor alle artikelen "
-    "in die sectie, ook artikelen die nog niet los in de catalogus staan) of, indien nodig, "
-    "per individueel EAN-nummer."
-)
-
-# ── Per sectie (aanbevolen) ───────────────────────────────────────────────────
-with st.expander("📋 Padcodes per sectie (aanbevolen)", expanded=True):
-    st.markdown("""
-1. Download het secties-overzicht hieronder.
-2. Vul de kolom **Pad_code** in met het echte padnummer (bijv. `7` of `15A`) —
-   niet `Pad 7`, gewoon het kale nummer.
-3. Upload het bestand terug. Alle artikelen in die sectie krijgen direct de nieuwe pad,
-   ook artikelen die nog niet los in de catalogus staan.
-""")
-
-    if st.button("📥 Genereer secties-overzicht", use_container_width=True):
-        artikelen_db = laad_artikelen()
-        alle_sap = laad_alle_sap()
-
-        # Verzamel alle bekende secties: uit de catalogus én uit alle SAP-exports
-        bekende_secties = {}  # sectie -> (pad_code, fictief)
-        for a in artikelen_db:
-            s = a.get("sectie")
-            if s and not s.startswith("(sectie-marker"):
-                bekende_secties.setdefault(s, (a.get("pad_code") or "", False))
-        for sap_per_winkel in alle_sap.values():
-            for rij in sap_per_winkel.values():
-                s = rij.get("groepsnaam")
-                if s and s not in bekende_secties:
-                    bekende_secties[s] = ("", True)
-
-        secties_lijst = [
-            {"sectie": s, "pad_code": pad, "fictief": (pad == "")}
-            for s, (pad, _) in sorted(bekende_secties.items())
-        ]
-        xlsx_bytes = bouw_sectie_overzicht_xlsx(secties_lijst)
-        st.session_state["secties_overzicht_xlsx"] = xlsx_bytes
-        st.success(f"✅ {len(secties_lijst)} secties gevonden.")
-
-    if "secties_overzicht_xlsx" in st.session_state:
-        st.download_button(
-            "⬇️ Download secties-overzicht.xlsx",
-            data=st.session_state["secties_overzicht_xlsx"],
-            file_name="secties_overzicht.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-        )
-
-    sectie_bestand = st.file_uploader(
-        "Ingevuld secties-bestand uploaden (.xlsx)",
-        type=["xlsx"],
-        key="sectie_padcode_upload",
-    )
-    if sectie_bestand:
-        if st.button("🗺️ Verwerk padcodes per sectie", type="primary"):
-            sectie_pad = lees_sectie_padcodes_xlsx(sectie_bestand.read())
-            if not sectie_pad:
-                st.error("❌ Geen (ingevulde) Sectie/Pad_code-combinaties gevonden.")
-            else:
-                bijgewerkt = update_pad_codes_by_sectie(sectie_pad)
-                st.success(f"✅ {bijgewerkt} secties bijgewerkt met een nieuw padnummer.")
-                st.info("De artikelcache is geleegd — nieuwe piklijsten gebruiken meteen de nieuwe padcodes.")
-
-# ── Per EAN (uitzondering — losse correcties) ─────────────────────────────────
-with st.expander("📋 Padcodes per EAN (uitzondering)", expanded=False):
-    st.caption(
-        "Voor losse correcties op individuele artikelen. Kolommen **EAN** en **Pad_code**. "
-        "Kolomnamen die worden herkend: `EAN`, `Artikelnummer`, `Barcode` en "
-        "`Pad_code`, `Padcode`, `Pad`, `Pad_nr`."
-    )
-    padcode_bestand = st.file_uploader(
-        "Selecteer padcodes-bestand (.xlsx)",
-        type=["xlsx"],
-        key="padcode_upload",
-    )
-    if padcode_bestand:
-        if st.button("🗺️ Verwerk padcodes per EAN", type="primary"):
-            pad_codes = lees_padcodes_xlsx(padcode_bestand.read())
-            if not pad_codes:
-                st.error("❌ Geen padcodes gevonden. Controleer of de Excel kolommen 'EAN' en 'Pad_code' bevat.")
-            else:
-                bijgewerkt = update_pad_codes(pad_codes)
-                st.success(f"✅ {bijgewerkt} artikelen bijgewerkt met padcodes.")
-                st.info("De artikelcache is geleegd — nieuwe piklijsten gebruiken meteen de nieuwe padcodes.")
 st.markdown("---")
 
 # ─── Stap 1 — Piklijsten genereren (PDF) ─────────────────────────────────────
