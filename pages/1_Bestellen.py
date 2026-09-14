@@ -310,15 +310,7 @@ def _render_dbo_sectie(dbo_opgeslagen: list, dbo_secties: list, vergrendeld: boo
             bestaande_regels = dbo_bestaand.get(sectie_dbo, [])
             n_rijen = max(10, len(bestaande_regels) + 2)
             for i in range(n_rijen):
-                c1, c2 = st.columns([4, 1])
-                with c1:
-                    st.text_input(
-                        "Artikel",
-                        key=f"dbo_art_{sectie_dbo}_{i}",
-                        label_visibility="collapsed",
-                        placeholder="Artikelnaam...",
-                        disabled=vergrendeld,
-                    )
+                c2, c1 = st.columns([1, 4])
                 with c2:
                     st.number_input(
                         "Aantal",
@@ -326,6 +318,14 @@ def _render_dbo_sectie(dbo_opgeslagen: list, dbo_secties: list, vergrendeld: boo
                         max_value=999,
                         key=f"dbo_qty_{sectie_dbo}_{i}",
                         label_visibility="collapsed",
+                        disabled=vergrendeld,
+                    )
+                with c1:
+                    st.text_input(
+                        "Artikel",
+                        key=f"dbo_art_{sectie_dbo}_{i}",
+                        label_visibility="collapsed",
+                        placeholder="Artikelnaam...",
                         disabled=vergrendeld,
                     )
 
@@ -392,9 +392,7 @@ with tab_alle:
             for art in artikelen_sectie:
                 ean   = art["ean"]
                 label = art["artikel"]
-                col_art, col_num = st.columns([5, 1])
-                with col_art:
-                    st.markdown(f"<p class='art-label'>{label}</p>", unsafe_allow_html=True)
+                col_num, col_art = st.columns([1, 5])
                 with col_num:
                     st.number_input(
                         label=f"_{ean}",
@@ -404,6 +402,8 @@ with tab_alle:
                         label_visibility="collapsed",
                         key=f"art_{ean}",
                     )
+                with col_art:
+                    st.markdown(f"<p class='art-label'>{label}</p>", unsafe_allow_html=True)
 
     st.markdown("---")
 
