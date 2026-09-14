@@ -122,25 +122,6 @@ st.caption(
     "De aantallen worden automatisch opgeslagen zodat je ze in Stap 2 kunt corrigeren."
 )
 
-# ── Pad-groepen instellen ─────────────────────────────────────────────────────
-with st.expander("⚙️ Pad-groepen instellen (optioneel)", expanded=False):
-    st.caption(
-        "Typ per regel de padnummers die **samen op één blad** moeten worden afgedrukt, "
-        "gescheiden door komma's. Paden die je hier niet noemt, krijgen elk een eigen blad. "
-        "De padnummers moeten exact overeenkomen met de waarden in de piklijst (bijv. **15**, **15A**, **7**)."
-    )
-    bekende_pads = st.session_state.get("bekende_pads", [])
-    if bekende_pads:
-        st.info(f"Bekende pads uit vorige generatie: **{', '.join(bekende_pads)}**")
-    groepen_tekst = st.text_area(
-        "Pad-groepen (één groep per regel):",
-        value=st.session_state.get("pad_groepen_tekst", ""),
-        placeholder="Voorbeeld:\n15, 15A\n7, 12",
-        height=120,
-        key="pad_groepen_input",
-    )
-    st.session_state["pad_groepen_tekst"] = groepen_tekst
-
 
 def _parse_pad_groepen(tekst: str) -> list:
     """Zet tekstveld om naar lijst van lijsten: '15, 15A\\n7, 12' → [['15','15A'],['7','12']]"""

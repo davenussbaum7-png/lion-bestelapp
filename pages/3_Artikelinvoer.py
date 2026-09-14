@@ -619,6 +619,44 @@ with tab2:
             else:
                 st.error(f"Fout {resp.status_code}: {resp.text[:300]}")
 
+    st.divider()
+
+    # ── Pad-groepen voor printen instellen ───────────────────────────────────
+    st.markdown("### 🖨️ Pad-groepen Printen Instellen")
+    st.caption(
+        "Bepaal welke padnummers **samen op één blad** worden afgedrukt bij het genereren "
+        "van de piklijst (Beheer → Stap 1). Typ per regel de pads die je wilt samenvoegen, "
+        "gescheiden door komma's. Paden die je hier niet noemt, krijgen elk een eigen blad. "
+        "De padnummers moeten exact overeenkomen met de bekende pads (zie hieronder)."
+    )
+    bekende_pads_ai = st.session_state.get("bekende_pads", [])
+    if bekende_pads_ai:
+        st.info(f"Bekende pads uit laatste piklijst: **{', '.join(str(p) for p in bekende_pads_ai)}**")
+    else:
+        st.info("Nog geen bekende pads — genereer eerst een piklijst in Beheer → Stap 1.")
+    groepen_tekst = st.text_area(
+        "Pad-groepen (één groep per regel):",
+        value=st.session_state.get("pad_groepen_tekst", ""),
+        placeholder="Voorbeeld:\n15, 15A\n7, 12",
+        height=150,
+        key="pad_groepen_input",
+    )
+    st.session_state["pad_groepen_tekst"] = groepen_tekst
+    if groepen_tekst.strip():
+        groepen_preview = [
+            [p.strip() for p in regel.split(",") if p.strip()]
+            for regel in groepen_tekst.strip().splitlines()
+            if any(p.strip() for p in regel.split(","))
+        ]
+        groepen_preview = [g for g in groepen_preview if len(g) > 1]
+        if groepen_preview:
+            st.success(
+                "Actieve groepen: " +
+                "  |  ".join(", ".join(g) for g in groepen_preview)
+            )
+        else:
+            st.warning("Geen geldige groepen herkend — elke regel moet minstens 2 padnummers bevatten.")
+
 # ════════════════════════════════════════════════════════════════════════════
 # TAB 3 — BEHEREN (bewerken / verwijderen)
 # ════════════════════════════════════════════════════════════════════════════
