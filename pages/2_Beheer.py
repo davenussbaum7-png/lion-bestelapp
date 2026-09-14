@@ -20,7 +20,7 @@ if st.session_state.get("rol") != "beheerder":
 from utils.database import (
     laad_artikelen, laad_alle_bestellingen, laad_alle_dbo_bestellingen,
     laad_alle_sap, sla_sap_op, bestelling_status,
-    reset_alle_bestellingen, reset_winkel_bestellingen, update_pad_codes,
+    reset_winkel_bestellingen, update_pad_codes,
     update_pad_codes_by_sectie,
     sla_piklijst_correcties_op, laad_piklijst_correcties,
     sla_definitief_op, laad_winkels_met_correcties,
