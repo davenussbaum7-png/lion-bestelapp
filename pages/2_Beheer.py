@@ -1,12 +1,8 @@
 """
 Lion Beddenshop — Beheerpagina (Wouter)
-SAP uploaden, piklijsten genereren (PDF), correcties invoeren, paklijsten genereren (PDF),
-reset, historiek, winkelbeheer.
+SAP uploaden, piklijsten genereren (PDF), correcties invoeren, paklijsten genereren (PDF), reset, historiek.
 """
 import io
-import re as _re
-import datetime as _dt
-import pandas as pd
 import streamlit as st
 st.set_page_config(
     page_title="Beheer — Lion Beddenshop",
@@ -14,18 +10,8 @@ st.set_page_config(
     layout="wide",
 )
 
-# ─── Verberg Streamlit-branding ───────────────────────────────────────────────
-st.markdown("""
-<style>
-[data-testid="stToolbar"] { display: none !important; }
-.stDeployButton { display: none !important; }
-footer { display: none !important; }
-#MainMenu { display: none !important; }
-</style>
-""", unsafe_allow_html=True)
-
 # ─── Toegangscontrole ─────────────────────────────────────────────────────────
-if st.session_state.get("rol") != "beheerder":
+if st.session_state.get("rol") != "beheer":
     st.warning("Toegang geweigerd. Log in als beheerder.")
     if st.button("← Naar inlogpagina"):
         st.switch_page("app.py")
@@ -34,16 +20,17 @@ if st.session_state.get("rol") != "beheerder":
 from utils.database import (
     laad_artikelen, laad_alle_bestellingen, laad_alle_dbo_bestellingen,
     laad_alle_sap, sla_sap_op, bestelling_status,
-    reset_en_laad_buffer, update_pad_codes,
+    reset_alle_bestellingen, reset_winkel_bestellingen, update_pad_codes,
+    update_pad_codes_by_sectie,
     sla_piklijst_correcties_op, laad_piklijst_correcties,
     sla_definitief_op, laad_winkels_met_correcties,
     sla_order_history_op, update_order_status, laad_order_history,
     laad_order_statussen, laad_winkels, wis_order_history,
-    voeg_winkel_toe, verwijder_winkel, stel_pin_in,
 )
 from utils.genereer import (
     bouw_artikellijst, schrijf_piklijst_pdf, schrijf_paklijst_pdf,
-    lees_sap_xlsx, lees_padcodes_xlsx, maak_zip,
+    lees_sap_xlsx, lees_padcodes_xlsx, lees_sectie_padcodes_xlsx,
+    bouw_sectie_overzicht_xlsx, maak_zip,
 )
 
 # ─── Header ───────────────────────────────────────────────────────────────────
@@ -58,14 +45,10 @@ with col2:
         st.switch_page("app.py")
 st.markdown("---")
 
-# ─── Data éénmalig laden (wordt hergebruikt in reset-sectie) ──────────────────
-status        = bestelling_status()
-statussen     = laad_order_statussen()
-winkels_corr  = laad_winkels_met_correcties()
-alle_winkels  = [w["name"] for w in laad_winkels()]
-
 # ─── Overzicht bestellingen ───────────────────────────────────────────────────
 st.subheader("📊 Status bestellingen")
+status = bestelling_status()
+statussen = laad_order_statussen()
 
 STATUS_LABELS = {
     "geen_bestelling": ("⚪", "Geen bestelling"),
@@ -74,12 +57,12 @@ STATUS_LABELS = {
     "pakket_onderweg": ("🚚", "Pakket onderweg"),
 }
 
-cols = st.columns(min(len(status), 5)) if status else []
+cols = st.columns(min(len(status), 5))
 for i, s in enumerate(status):
     with cols[i % len(cols)]:
         winkel_status = statussen.get(s["winkel"], {}).get("status", "geen_bestelling")
         icoon, label = STATUS_LABELS.get(winkel_status, ("⚪", winkel_status))
-        stuks_str  = f"{s['stuks']} st" if s["stuks"] > 0 else "—"
+        stuks_str = f"{s['stuks']} st" if s["stuks"] > 0 else "—"
         regels_str = f"{s['regels']} regels"
         st.metric(
             label=f"{icoon} {s['winkel']}",
@@ -134,36 +117,90 @@ st.markdown("---")
 # ─── Padcodes uploaden ────────────────────────────────────────────────────────
 st.subheader("🗺️ Padcodes uploaden")
 st.caption(
-    "Upload een Excel met kolommen **EAN** en **Pad_code** om de padnummers in de catalogus bij te werken. "
-    "Na het uploaden worden de piklijsten automatisch per pad gegroepeerd."
+    "Werk padnummers bij **per sectie** (aanbevolen — geldt meteen voor alle artikelen "
+    "in die sectie, ook artikelen die nog niet los in de catalogus staan) of, indien nodig, "
+    "per individueel EAN-nummer."
 )
-with st.expander("📋 Vereist Excel-formaat", expanded=False):
+
+# ── Per sectie (aanbevolen) ───────────────────────────────────────────────────
+with st.expander("📋 Padcodes per sectie (aanbevolen)", expanded=True):
     st.markdown("""
-Minimaal twee kolommen (kolomnamen worden automatisch herkend):
-
-| EAN | Pad_code |
-|-----|----------|
-| 121201532 | A1 |
-| 121201534 | A1 |
-| 8719727167355 | B3 |
-
-Kolomnamen die worden herkend: `EAN`, `Artikelnummer`, `Barcode` voor EAN
-en `Pad_code`, `Padcode`, `Pad`, `Pad_nr` voor het padnummer.
+1. Download het secties-overzicht hieronder.
+2. Vul de kolom **Pad_code** in met het echte padnummer (bijv. `7` of `15A`) —
+   niet `Pad 7`, gewoon het kale nummer.
+3. Upload het bestand terug. Alle artikelen in die sectie krijgen direct de nieuwe pad,
+   ook artikelen die nog niet los in de catalogus staan.
 """)
-padcode_bestand = st.file_uploader(
-    "Selecteer padcodes-bestand (.xlsx)",
-    type=["xlsx"],
-    key="padcode_upload",
-)
-if padcode_bestand:
-    if st.button("🗺️ Verwerk padcodes", type="primary"):
-        pad_codes = lees_padcodes_xlsx(padcode_bestand.read())
-        if not pad_codes:
-            st.error("❌ Geen padcodes gevonden. Controleer of de Excel kolommen 'EAN' en 'Pad_code' bevat.")
-        else:
-            bijgewerkt = update_pad_codes(pad_codes)
-            st.success(f"✅ {bijgewerkt} artikelen bijgewerkt met padcodes.")
-            st.info("De artikelcache is geleegd — nieuwe piklijsten gebruiken meteen de nieuwe padcodes.")
+
+    if st.button("📥 Genereer secties-overzicht", use_container_width=True):
+        artikelen_db = laad_artikelen()
+        alle_sap = laad_alle_sap()
+
+        # Verzamel alle bekende secties: uit de catalogus én uit alle SAP-exports
+        bekende_secties = {}  # sectie -> (pad_code, fictief)
+        for a in artikelen_db:
+            s = a.get("sectie")
+            if s and not s.startswith("(sectie-marker"):
+                bekende_secties.setdefault(s, (a.get("pad_code") or "", False))
+        for sap_per_winkel in alle_sap.values():
+            for rij in sap_per_winkel.values():
+                s = rij.get("groepsnaam")
+                if s and s not in bekende_secties:
+                    bekende_secties[s] = ("", True)
+
+        secties_lijst = [
+            {"sectie": s, "pad_code": pad, "fictief": (pad == "")}
+            for s, (pad, _) in sorted(bekende_secties.items())
+        ]
+        xlsx_bytes = bouw_sectie_overzicht_xlsx(secties_lijst)
+        st.session_state["secties_overzicht_xlsx"] = xlsx_bytes
+        st.success(f"✅ {len(secties_lijst)} secties gevonden.")
+
+    if "secties_overzicht_xlsx" in st.session_state:
+        st.download_button(
+            "⬇️ Download secties-overzicht.xlsx",
+            data=st.session_state["secties_overzicht_xlsx"],
+            file_name="secties_overzicht.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+
+    sectie_bestand = st.file_uploader(
+        "Ingevuld secties-bestand uploaden (.xlsx)",
+        type=["xlsx"],
+        key="sectie_padcode_upload",
+    )
+    if sectie_bestand:
+        if st.button("🗺️ Verwerk padcodes per sectie", type="primary"):
+            sectie_pad = lees_sectie_padcodes_xlsx(sectie_bestand.read())
+            if not sectie_pad:
+                st.error("❌ Geen (ingevulde) Sectie/Pad_code-combinaties gevonden.")
+            else:
+                bijgewerkt = update_pad_codes_by_sectie(sectie_pad)
+                st.success(f"✅ {bijgewerkt} secties bijgewerkt met een nieuw padnummer.")
+                st.info("De artikelcache is geleegd — nieuwe piklijsten gebruiken meteen de nieuwe padcodes.")
+
+# ── Per EAN (uitzondering — losse correcties) ─────────────────────────────────
+with st.expander("📋 Padcodes per EAN (uitzondering)", expanded=False):
+    st.caption(
+        "Voor losse correcties op individuele artikelen. Kolommen **EAN** en **Pad_code**. "
+        "Kolomnamen die worden herkend: `EAN`, `Artikelnummer`, `Barcode` en "
+        "`Pad_code`, `Padcode`, `Pad`, `Pad_nr`."
+    )
+    padcode_bestand = st.file_uploader(
+        "Selecteer padcodes-bestand (.xlsx)",
+        type=["xlsx"],
+        key="padcode_upload",
+    )
+    if padcode_bestand:
+        if st.button("🗺️ Verwerk padcodes per EAN", type="primary"):
+            pad_codes = lees_padcodes_xlsx(padcode_bestand.read())
+            if not pad_codes:
+                st.error("❌ Geen padcodes gevonden. Controleer of de Excel kolommen 'EAN' en 'Pad_code' bevat.")
+            else:
+                bijgewerkt = update_pad_codes(pad_codes)
+                st.success(f"✅ {bijgewerkt} artikelen bijgewerkt met padcodes.")
+                st.info("De artikelcache is geleegd — nieuwe piklijsten gebruiken meteen de nieuwe padcodes.")
 st.markdown("---")
 
 # ─── Stap 1 — Piklijsten genereren (PDF) ─────────────────────────────────────
@@ -211,9 +248,10 @@ if st.button("🖨️ Genereer alle piklijsten", type="primary", use_container_w
     alle_dbo     = laad_alle_dbo_bestellingen()
     alle_sap     = laad_alle_sap()
 
-    piklijsten = {}
-    n_gemaakt  = 0
-    alle_pads  = set()
+    piklijsten = {}   # {winkelnaam: pdf_bytes}
+    n_gemaakt = 0
+    alle_pads = set()
+    pad_conflicten = []  # (winkelnaam, artikel) — EAN-pad wijkt af van sectie-pad
 
     progressie = st.progress(0, text="Bezig met genereren…")
     winkels_met_orders = [(w, o) for w, o in alle_orders.items() if any(v > 0 for v in o.values())]
@@ -225,19 +263,32 @@ if st.button("🖨️ Genereer alle piklijsten", type="primary", use_container_w
         sap      = alle_sap.get(winkelnaam, {})
         artikelen = bouw_artikellijst(winkelnaam, orders, dbo, sap, artikelen_db)
 
+        # Verzamel unieke pads (voor de hint in het pad-groepen veld)
         alle_pads.update(a["pad_code"] for a in artikelen if a.get("pad_code"))
+        # ✨ Dubbele check: EAN-pad vs sectie-pad — verzamel tegenstrijdigheden
+        pad_conflicten.extend(
+            (winkelnaam, a) for a in artikelen if a.get("pad_conflict")
+        )
 
+        # PDF genereren met pad-groepen
         pdf_bytes = schrijf_piklijst_pdf(winkelnaam, artikelen, pad_groepen=pad_groepen)
         piklijsten[winkelnaam] = pdf_bytes
 
+        # Correcties opslaan in database (startpunt voor Stap 2)
         sla_piklijst_correcties_op(winkelnaam, artikelen)
+
+        # ✨ Orderhistorie opslaan (snapshot vóór reset)
         sla_order_history_op(winkelnaam, artikelen)
+
+        # ✨ Status bijwerken naar 'piklijst_klaar'
         update_order_status(winkelnaam, "piklijst_klaar")
 
         n_gemaakt += 1
 
     progressie.progress(1.0, text="Klaar!")
 
+    # Bewaar bekende pads voor de hint (gesorteerd)
+    import re as _re
     def _pad_sort(p):
         m = _re.match(r'^(\d+)([A-Za-z]*)$', str(p))
         return (int(m.group(1)), m.group(2).upper()) if m else (9999, str(p))
@@ -251,6 +302,16 @@ if st.button("🖨️ Genereer alle piklijsten", type="primary", use_container_w
             groep_labels = " | ".join(", ".join(g) for g in pad_groepen)
             st.info(f"Pad-groepen toegepast: {groep_labels}")
         st.success(f"✅ {n_gemaakt} piklijst(en) gegenereerd. Download hieronder per winkel of allemaal tegelijk.")
+
+        # ✨ Dubbele check: EAN-pad vs sectie-pad — meld tegenstrijdigheden
+        if pad_conflicten:
+            with st.expander(f"⚠️ {len(pad_conflicten)} artikel(en) met afwijkende pad t.o.v. hun sectie", expanded=False):
+                st.caption(
+                    "Bij deze artikelen wijkt de pad die specifiek op het EAN staat af van de pad "
+                    "die voor de hele sectie geldt. Meestal een tikfout in de catalogus — controleer welke klopt."
+                )
+                for winkelnaam, a in pad_conflicten:
+                    st.write(f"**{winkelnaam}** — {a['artikel']} (EAN {a['ean']}, sectie *{a['sectie']}*) → pad **{a['pad_code']}**")
 
 # Download-knoppen per winkel + zip
 if "piklijsten_pdf" in st.session_state:
@@ -267,6 +328,7 @@ if "piklijsten_pdf" in st.session_state:
                 use_container_width=True,
                 key=f"dl_pik_{winkelnaam}",
             )
+    # ✨ Zip-download alle piklijsten
     if len(piklijsten) > 1:
         zip_bytes = maak_zip(piklijsten, "_PIKLIJST")
         st.download_button(
@@ -287,12 +349,14 @@ st.caption(
     "Sla op per winkel. De gecorrigeerde aantallen worden gebruikt voor de paklijst in Stap 3."
 )
 
-if not winkels_corr:
+winkels_met_corr = laad_winkels_met_correcties()
+
+if not winkels_met_corr:
     st.info("Nog geen piklijsten gegenereerd. Voer eerst Stap 1 uit.")
 else:
     gekozen_winkel = st.selectbox(
         "Kies winkel (typ om te zoeken):",
-        options=winkels_corr,
+        options=winkels_met_corr,
         key="correctie_winkel",
     )
 
@@ -304,6 +368,7 @@ else:
         else:
             key_prefix = f"corr_{gekozen_winkel}"
 
+            # Initialiseer session_state voor ALLE regels vóór het filteren
             for c in correcties:
                 sk = f"{key_prefix}_{c['id']}"
                 if sk not in st.session_state:
@@ -343,7 +408,7 @@ else:
                 st.markdown("<hr style='margin:4px 0'>", unsafe_allow_html=True)
 
                 for c in gefilterd:
-                    sk  = f"{key_prefix}_{c['id']}"
+                    sk = f"{key_prefix}_{c['id']}"
                     col = st.columns([1, 3, 7, 3, 3])
                     col[0].write(c.get("pad_code") or "—")
                     col[1].write(c.get("sectie") or "")
@@ -375,23 +440,20 @@ st.caption(
     "Sla eerst de correcties op in Stap 2 voordat je hier genereert."
 )
 
-if not winkels_corr:
+winkels_paklijst = laad_winkels_met_correcties()
+
+if not winkels_paklijst:
     st.info("Nog geen piklijsten gegenereerd. Voer eerst Stap 1 uit.")
 else:
-    col_pak1, col_pak2, col_pak3 = st.columns([2, 1, 1])
+    col_pak1, col_pak2 = st.columns([2, 1])
     with col_pak1:
         gekozen_pak = st.multiselect(
             "Kies winkels voor paklijst:",
-            options=winkels_corr,
-            default=[],
+            options=winkels_paklijst,
+            default=winkels_paklijst,
             key="paklijst_winkels",
         )
     with col_pak2:
-        st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("✅ Selecteer alles", use_container_width=True):
-            st.session_state["paklijst_winkels"] = winkels_corr
-            st.rerun()
-    with col_pak3:
         st.markdown("<br>", unsafe_allow_html=True)
         genereer_pak = st.button(
             "📦 Genereer paklijsten",
@@ -413,6 +475,7 @@ else:
         if paklijsten:
             st.session_state["paklijsten_pdf"] = paklijsten
 
+    # Download-knoppen + zip
     if "paklijsten_pdf" in st.session_state:
         paklijsten = st.session_state["paklijsten_pdf"]
         st.caption(f"**{len(paklijsten)} paklijst(en) beschikbaar:**")
@@ -427,6 +490,7 @@ else:
                     use_container_width=True,
                     key=f"dl_pak_{winkelnaam}",
                 )
+        # ✨ Zip-download alle paklijsten
         if len(paklijsten) > 1:
             zip_bytes = maak_zip(paklijsten, "_PAKLIJST")
             st.download_button(
@@ -443,13 +507,12 @@ st.markdown("---")
 # ─── Reset bestellingen ───────────────────────────────────────────────────────
 st.subheader("🗑️ Bestellingen wissen")
 
-winkels_met_orders = [s["winkel"] for s in status if s["regels"] > 0]
+status_reset = bestelling_status()
+winkels_met_orders = [s["winkel"] for s in status_reset if s["regels"] > 0]
 
 if not winkels_met_orders:
     st.info("Geen openstaande bestellingen om te wissen.")
 else:
-    st.warning("⚠️ Zorg dat je alle piklijsten gedownload hebt voordat je wist!")
-
     geselecteerd = st.multiselect(
         "Kies welke winkels je wilt wissen:",
         options=winkels_met_orders,
@@ -470,7 +533,7 @@ else:
         col_ja, col_nee = st.columns(2)
         with col_ja:
             if st.button("Ja, wis bestellingen", type="primary", use_container_width=True):
-                reset_en_laad_buffer(te_wissen)
+                reset_winkel_bestellingen(te_wissen)
                 st.cache_data.clear()
                 for k in ["piklijsten_pdf", "paklijsten_pdf", "_te_wissen"]:
                     st.session_state.pop(k, None)
@@ -492,80 +555,6 @@ else:
 
 st.markdown("---")
 
-# ─── Winkelbeheer ─────────────────────────────────────────────────────────────
-st.subheader("🏪 Winkelbeheer")
-st.caption("Winkels toevoegen, verwijderen en PIN-codes instellen.")
-
-wb_tab1, wb_tab2, wb_tab3 = st.tabs(["➕ Toevoegen", "🗑️ Verwijderen", "🔑 PIN instellen"])
-
-with wb_tab1:
-    st.caption("Voeg een nieuwe winkel toe. De winkel kan daarna direct inloggen met het gedeelde wachtwoord.")
-    nieuwe_naam = st.text_input("Winkelnaam", placeholder="bijv. Leiden", key="nieuwe_winkel_naam")
-    nieuwe_pin  = st.text_input("PIN (optioneel — laat leeg voor gedeeld wachtwoord)", type="password", key="nieuwe_winkel_pin")
-    if st.button("➕ Winkel toevoegen", type="primary", disabled=not nieuwe_naam.strip()):
-        naam_schoon = nieuwe_naam.strip()
-        if naam_schoon.lower() in [w.lower() for w in alle_winkels]:
-            st.error(f"⚠️ Winkel '{naam_schoon}' bestaat al.")
-        else:
-            voeg_winkel_toe(naam_schoon, nieuwe_pin.strip())
-            st.success(f"✅ Winkel '{naam_schoon}' toegevoegd.")
-            st.rerun()
-
-with wb_tab2:
-    if not alle_winkels:
-        st.info("Geen winkels gevonden.")
-    else:
-        te_verwijderen = st.selectbox("Kies winkel om te verwijderen:", options=alle_winkels, key="verwijder_winkel_keuze")
-
-        @st.dialog("⚠️ Winkel verwijderen")
-        def bevestig_verwijder():
-            naam = st.session_state.get("_verwijder_naam", "")
-            st.warning(
-                f"Je staat op het punt winkel **{naam}** te verwijderen. "
-                "Alle bestellingen, SAP-data en historiek van deze winkel worden permanent gewist. "
-                "**Dit kan niet ongedaan worden gemaakt.**"
-            )
-            col_ja, col_nee = st.columns(2)
-            with col_ja:
-                if st.button("Ja, verwijder winkel", type="primary", use_container_width=True):
-                    verwijder_winkel(naam)
-                    st.session_state.pop("_verwijder_naam", None)
-                    st.success(f"✅ Winkel '{naam}' verwijderd.")
-                    st.rerun()
-            with col_nee:
-                if st.button("Annuleren", use_container_width=True):
-                    st.rerun()
-
-        if st.button("🗑️ Verwijder deze winkel", use_container_width=True):
-            st.session_state["_verwijder_naam"] = te_verwijderen
-            bevestig_verwijder()
-
-with wb_tab3:
-    st.caption(
-        "Stel een eigen PIN in per winkel. "
-        "Als je de PIN leeg laat, valt de winkel terug op het gedeelde wachtwoord uit de app-instellingen."
-    )
-    if not alle_winkels:
-        st.info("Geen winkels gevonden.")
-    else:
-        pin_winkel = st.selectbox("Kies winkel:", options=alle_winkels, key="pin_winkel_keuze")
-        nieuwe_winkel_pin = st.text_input(
-            "Nieuwe PIN (leeg = gedeeld wachtwoord gebruiken)",
-            type="password",
-            key="nieuwe_pin_input",
-        )
-        col_pin1, col_pin2 = st.columns(2)
-        with col_pin1:
-            if st.button("🔑 Stel PIN in", type="primary", use_container_width=True):
-                stel_pin_in(pin_winkel, nieuwe_winkel_pin.strip())
-                if nieuwe_winkel_pin.strip():
-                    st.success(f"✅ PIN ingesteld voor {pin_winkel}.")
-                else:
-                    st.success(f"✅ PIN gewist voor {pin_winkel} — winkel gebruikt nu gedeeld wachtwoord.")
-                st.rerun()
-
-st.markdown("---")
-
 # ─── Orderhistoriek ───────────────────────────────────────────────────────────
 st.subheader("📜 Orderhistoriek")
 st.caption(
@@ -573,6 +562,12 @@ st.caption(
     "De data blijft bewaard na een reset, zodat je altijd kunt terugkijken."
 )
 
+import pandas as pd
+import datetime as _dt
+
+alle_winkels = [w["name"] for w in laad_winkels()]
+
+# ── Filters ───────────────────────────────────────────────────────────────────
 fc1, fc2 = st.columns(2)
 with fc1:
     hist_filter = st.selectbox(
@@ -590,6 +585,7 @@ with fc2:
 winkel_filter = None if hist_filter == "Alle winkels" else hist_filter
 history = laad_order_history(winkelnaam=winkel_filter, limit=500)
 
+# Jaar-filter client-side (sneller dan extra DB-call)
 if hist_jaar != "Alle jaren":
     history = [h for h in history if h.get("jaar") == int(hist_jaar)]
 
@@ -610,8 +606,9 @@ else:
     st.dataframe(df, use_container_width=True, hide_index=True)
     st.caption(f"{len(history)} piklijst-generaties weergegeven.")
 
+# ── Historiek wissen ──────────────────────────────────────────────────────────
 with st.expander("🗑️ Historiek wissen", expanded=False):
-    st.caption("Verwijder historiek-regels per winkel en/of vóór een bepaalde datum.")
+    st.caption("Verwijder historiek-regels per winkel en/of vóór een bepaalde datum. Beide filters tegelijk zijn mogelijk.")
 
     wc1, wc2 = st.columns(2)
     with wc1:
@@ -630,6 +627,7 @@ with st.expander("🗑️ Historiek wissen", expanded=False):
     wis_winkel_val = None if wis_winkel == "Alle winkels" else wis_winkel
     wis_datum_val  = wis_voor.isoformat() if wis_voor else None
 
+    # Omschrijving wat er gewist wordt
     omschr_delen = []
     if wis_winkel_val:
         omschr_delen.append(f"winkel **{wis_winkel_val}**")
