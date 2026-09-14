@@ -108,9 +108,14 @@ def bouw_artikellijst(winkelnaam, orders, dbo_orders, sap_data, artikelen_db):
         cat = catalogus.get(ean, {})
         sap = sap_data.get(ean, {})
         stuks = sap.get("stuks_verkocht", 0) or 0
-        voorraad = sap.get("voorraad_centraal", 999)
-        if voorraad is None:
-            voorraad = 999
+        # Onderscheid: EAN helemaal niet in SAP → None (toon "—")
+        # EAN wél in SAP maar voorraad_centraal ontbreekt/null → 999 (onbekend)
+        if ean in sap_data:
+            voorraad = sap.get("voorraad_centraal")
+            if voorraad is None:
+                voorraad = 999  # SAP-data aanwezig maar kolom leeg/null
+        else:
+            voorraad = None  # EAN niet in SAP-export → geen voorraadinfo
         sectie = cat.get("sectie") or sap.get("groepsnaam") or ""
         pad_code, pad_conflict = bepaal_pad(sectie, cat.get("pad_code"))
         resultaat.append({
@@ -124,7 +129,7 @@ def bouw_artikellijst(winkelnaam, orders, dbo_orders, sap_data, artikelen_db):
             "besteld":      besteld,
             "sap":          stuks,
             "voorraad":     voorraad,
-            "op_voorraad":  voorraad > 0,
+            "op_voorraad":  voorraad is None or voorraad > 0,
         })
 
     # 2. SAP-only (niet handmatig besteld door winkel, wel aanvulling nodig volgens SAP)
