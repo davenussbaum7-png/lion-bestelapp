@@ -473,11 +473,13 @@ def reset_winkel_bestellingen(winkel_namen: list):
     for naam in winkel_namen:
         sb.table("store_orders").delete().eq("store_name", naam).execute()
         sb.table("dbo_orders").delete().eq("store_name", naam).execute()
-        # Piklijst-correcties horen bij de net gewiste bestelling (Stap 2/3-data uit
-        # Stap 1) — zonder dit blijft Stap 2 de oude regels tonen na het wissen,
-        # want piklijst_correcties wordt anders pas overschreven bij de VOLGENDE
-        # piklijst-generatie voor die winkel, niet bij het wissen zelf.
+        # Piklijst-correcties en SAP-data horen bij de net gewiste bestelcyclus —
+        # zonder dit blijven Stap 2/3 en de piklijst-generatie oude regels/aanvullingen
+        # tonen na het wissen, want beide worden anders pas overschreven bij de
+        # VOLGENDE piklijst-generatie resp. SAP-upload voor die winkel, niet bij het
+        # wissen zelf.
         sb.table("piklijst_correcties").delete().eq("winkelnaam", naam).execute()
+        sb.table("sap_data").delete().eq("store_name", naam).execute()
     for naam in winkel_namen:
         update_order_status(naam, "geen_bestelling")
 
@@ -495,6 +497,7 @@ def reset_en_laad_buffer(winkel_namen: list):
         sb.table("store_orders").delete().eq("store_name", naam).execute()
         sb.table("dbo_orders").delete().eq("store_name", naam).execute()
         sb.table("piklijst_correcties").delete().eq("winkelnaam", naam).execute()
+        sb.table("sap_data").delete().eq("store_name", naam).execute()
         if buffer:
             rijen = [
                 {"store_name": naam, "ean": ean, "quantity": qty}
