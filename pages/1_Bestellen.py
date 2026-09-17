@@ -82,6 +82,24 @@ footer { display: none !important; }
     padding-bottom: 4px;
     border-bottom: 1px solid #e5e7eb;
 }
+.art-label-ingevuld { color: #166534; }
+.qty-badge {
+    display: inline-block;
+    background: #dcfce7;
+    color: #166534;
+    border-radius: 10px;
+    padding: 0 7px;
+    font-size: 0.8rem;
+    font-weight: 700;
+    margin-left: 6px;
+    vertical-align: middle;
+}
+.art-row-ingevuld {
+    background: #f0fdf4;
+    border-radius: 6px;
+    margin: 1px 0;
+    padding: 2px 4px;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -384,14 +402,20 @@ with tab_alle:
     _auto_expand = bool(zoekterm.strip()) and len(_secties_gesorteerd) <= 5
     for sectie, artikelen_sectie in _secties_gesorteerd:
         in_cart = sum(1 for a in artikelen_sectie if a["ean"] in _cart_eans)
+        sectie_stuks = sum(st.session_state.get(f"art_{a['ean']}", 0) for a in artikelen_sectie)
         sectie_label = f"📦 {sectie} ({len(artikelen_sectie)} artikelen)"
         if in_cart > 0:
-            sectie_label += f" · ✅ {in_cart} besteld"
+            sectie_label += f" · ✅ {in_cart} besteld · {sectie_stuks} stuks"
 
         with st.expander(sectie_label, expanded=_auto_expand):
             for art in artikelen_sectie:
-                ean   = art["ean"]
-                label = art["artikel"]
+                ean    = art["ean"]
+                label  = art["artikel"]
+                qty_nu = st.session_state.get(f"art_{ean}", 0)
+                ingevuld = qty_nu > 0
+                rij_klasse = "art-row-ingevuld" if ingevuld else ""
+                naam_klasse = "art-label art-label-ingevuld" if ingevuld else "art-label"
+                badge = f"<span class='qty-badge'>{qty_nu}×</span>" if ingevuld else ""
                 col_num, col_art = st.columns([1, 5])
                 with col_num:
                     st.number_input(
@@ -403,7 +427,7 @@ with tab_alle:
                         key=f"art_{ean}",
                     )
                 with col_art:
-                    st.markdown(f"<p class='art-label'>{label}</p>", unsafe_allow_html=True)
+                    st.markdown(f"<div class='{rij_klasse}'><p class='{naam_klasse}'>{label}{badge}</p></div>", unsafe_allow_html=True)
 
     st.markdown("---")
 
