@@ -318,8 +318,8 @@ def laad_alle_sap() -> dict:
     return result
 
 
-# ─── Piklijst-correcties ──────────────────────────────────────────────────────
-def sla_piklijst_correcties_op(winkelnaam: str, artikelen_lijst: list):
+# ─── Picklijst-correcties ──────────────────────────────────────────────────────
+def sla_picklijst_correcties_op(winkelnaam: str, artikelen_lijst: list):
     sb = _sb()
     sb.table("piklijst_correcties").delete().eq("winkelnaam", winkelnaam).execute()
     rijen = []

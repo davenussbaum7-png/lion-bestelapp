@@ -1,5 +1,5 @@
 """
-Genereer piklijsten en paklijsten vanuit web-bestellingen.
+Genereer picklijsten en paklijsten vanuit web-bestellingen.
 Gebaseerd op verwerk.py logica, aangepast voor webapp-gebruik.
 """
 import io
@@ -212,10 +212,10 @@ def bouw_artikellijst(winkelnaam, orders, dbo_orders, sap_data, artikelen_db):
     return resultaat
 
 
-# ─── Piklijst PDF ─────────────────────────────────────────────────────────────
-def schrijf_piklijst_pdf(winkelnaam, artikelen, pad_groepen=None, datum=None):
+# ─── Picklijst PDF ─────────────────────────────────────────────────────────────
+def schrijf_picklijst_pdf(winkelnaam, artikelen, pad_groepen=None, datum=None):
     """
-    Genereert piklijst als PDF-bytes (A4 liggend).
+    Genereert picklijst als PDF-bytes (A4 liggend).
     pad_groepen: optionele lijst van lijsten, bv. [["15","15A"], ["7","12"]]
     datum: datetime.date object; standaard vandaag.
     """
@@ -274,7 +274,7 @@ def schrijf_piklijst_pdf(winkelnaam, artikelen, pad_groepen=None, datum=None):
             legende += "   |   Pad ≥ 90 = <b>fictieve</b> looproute (nog niet de echte padindeling)"
         t = Table(
             [
-                [Paragraph(f"PIKLIJST — {winkelnaam.upper()}", s_titel)],
+                [Paragraph(f"Picklijst — {winkelnaam.upper()}", s_titel)],
                 [Paragraph(legende, s_leg)],
             ],
             colWidths=[sum(CW)],
@@ -547,7 +547,7 @@ def maak_zip(bestanden: dict, suffix: str = "") -> bytes:
     """
     Bundel meerdere PDF's in één zip.
     bestanden: {winkelnaam: pdf_bytes}
-    suffix: "_PIKLIJST" of "_PAKLIJST"
+    suffix: "_Picklijst" of "_PAKLIJST"
     Geeft zip als bytes terug.
     """
     buf = io.BytesIO()
