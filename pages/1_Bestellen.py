@@ -245,7 +245,7 @@ _icoon = {
 _label = {
     "geen_bestelling": "Nog geen bestelling ingediend",
     "besteld":         "Bestelling ontvangen door Wouter",
-    "piklijst_klaar":  "Piklijst is klaar — pakket wordt samengesteld",
+    "piklijst_klaar":  "Picklijst is klaar — pakket wordt samengesteld",
     "pakket_onderweg": "Pakket is onderweg naar jouw winkel! 🎉",
 }.get(_status, "")
 
@@ -264,7 +264,7 @@ st.markdown(f"""
 <div class="status-balk">
   <span class="status-stap {_s1}">✅ Bestelling ontvangen</span>
   <span class="status-pijl">›</span>
-  <span class="status-stap {_s2}">📋 Piklijst klaar</span>
+  <span class="status-stap {_s2}">📋 Picklijst klaar</span>
   <span class="status-pijl">›</span>
   <span class="status-stap {_s3}">🚚 Pakket onderweg</span>
   &nbsp;·&nbsp; <span style="color:#555">{_icoon} {_label}</span>{_tijdlabel}
@@ -299,7 +299,7 @@ elif _status == "geen_bestelling":
 elif _status == "besteld":
     st.success(
         f"✅ **Bestelling week {_leverweek} is ontvangen door Wouter.** "
-        "Je kunt de aantallen nog aanpassen tot de piklijst verwerkt wordt."
+        "Je kunt de aantallen nog aanpassen tot de picklijst verwerkt wordt."
     )
 
 st.markdown("---")

@@ -15,7 +15,7 @@ from utils.genereer import (
 # door 2_Beheer.py) te legen na een wijziging hier — deze pagina praat zelf verder
 # uitsluitend via requests/REST, niet via utils.database, om twee databasetoegangs-
 # methoden niet door elkaar te gebruiken. Zonder deze clear zou 2_Beheer.py tot een
-# uur lang (cache ttl) piklijsten kunnen genereren met de OUDE padcodes.
+# uur lang (cache ttl) picklijsten kunnen genereren met de OUDE padcodes.
 from utils.database import laad_artikelen as _laad_artikelen_supabase
 
 # ── Auth check — alleen beheer (Wouter) mag hier komen ───────────────────────
@@ -86,7 +86,7 @@ def upsert_sectie_marker(sectie: str, pad_code: str):
     van een hele sectie vast te leggen — ook voor artikelen die nog niet los
     in de catalogus staan (bijv. artikelen die alleen via een SAP-export bekend
     zijn). genereer.py's bouw_artikellijst() gebruikt dit rijtje automatisch
-    als sectie-fallback bij het genereren van piklijsten.
+    als sectie-fallback bij het genereren van picklijsten.
     """
     return requests.post(
         f"{SUPABASE_URL}/rest/v1/articles?on_conflict=ean",
@@ -625,15 +625,15 @@ with tab2:
     st.markdown("### 🖨️ Pad-groepen Printen Instellen")
     st.caption(
         "Bepaal welke padnummers **samen op één blad** worden afgedrukt bij het genereren "
-        "van de piklijst (Beheer → Stap 1). Typ per regel de pads die je wilt samenvoegen, "
+        "van de picklijst (Beheer → Stap 1). Typ per regel de pads die je wilt samenvoegen, "
         "gescheiden door komma's. Paden die je hier niet noemt, krijgen elk een eigen blad. "
         "De padnummers moeten exact overeenkomen met de bekende pads (zie hieronder)."
     )
     bekende_pads_ai = st.session_state.get("bekende_pads", [])
     if bekende_pads_ai:
-        st.info(f"Bekende pads uit laatste piklijst: **{', '.join(str(p) for p in bekende_pads_ai)}**")
+        st.info(f"Bekende pads uit laatste picklijst: **{', '.join(str(p) for p in bekende_pads_ai)}**")
     else:
-        st.info("Nog geen bekende pads — genereer eerst een piklijst in Beheer → Stap 1.")
+        st.info("Nog geen bekende pads — genereer eerst een picklijst in Beheer → Stap 1.")
     groepen_tekst = st.text_area(
         "Pad-groepen (één groep per regel):",
         value=st.session_state.get("pad_groepen_tekst", ""),

@@ -1,6 +1,6 @@
 """
 Lion Beddenshop — Beheerpagina (Wouter)
-SAP uploaden, piklijsten genereren (PDF), correcties invoeren, paklijsten genereren (PDF), reset, historiek.
+SAP uploaden, picklijsten genereren (PDF), correcties invoeren, paklijsten genereren (PDF), reset, historiek.
 """
 import io
 import streamlit as st
@@ -21,13 +21,13 @@ from utils.database import (
     laad_artikelen, laad_alle_bestellingen, laad_alle_dbo_bestellingen,
     laad_alle_sap, sla_sap_op, bestelling_status,
     reset_winkel_bestellingen,
-    sla_piklijst_correcties_op, laad_piklijst_correcties,
+    sla_picklijst_correcties_op, laad_piklijst_correcties,
     sla_definitief_op, laad_winkels_met_correcties,
     sla_order_history_op, update_order_status, laad_order_history,
     laad_order_statussen, laad_winkels, wis_order_history,
 )
 from utils.genereer import (
-    bouw_artikellijst, schrijf_piklijst_pdf, schrijf_paklijst_pdf,
+    bouw_artikellijst, schrijf_picklijst_pdf, schrijf_paklijst_pdf,
     lees_sap_xlsx, maak_zip,
 )
 
@@ -51,7 +51,7 @@ statussen = laad_order_statussen()
 STATUS_LABELS = {
     "geen_bestelling": ("⚪", "Geen bestelling"),
     "besteld":         ("🟡", "Besteld"),
-    "piklijst_klaar":  ("🟢", "Piklijst klaar"),
+    "piklijst_klaar":  ("🟢", "Picklijst klaar"),
     "pakket_onderweg": ("🚚", "Pakket onderweg"),
 }
 
@@ -115,10 +115,10 @@ st.markdown("---")
 
 st.markdown("---")
 
-# ─── Stap 1 — Piklijsten genereren (PDF) ─────────────────────────────────────
-st.subheader("📋 Stap 1 — Piklijsten genereren")
+# ─── Stap 1 — Picklijsten genereren (PDF) ─────────────────────────────────────
+st.subheader("📋 Stap 1 — Picklijsten genereren")
 st.caption(
-    "Genereert piklijsten als PDF voor alle winkels met ingevulde bestellingen. "
+    "Genereert picklijsten als PDF voor alle winkels met ingevulde bestellingen. "
     "De aantallen worden automatisch opgeslagen zodat je ze in Stap 2 kunt corrigeren."
 )
 
@@ -133,7 +133,7 @@ def _parse_pad_groepen(tekst: str) -> list:
     return groepen
 
 
-if st.button("🖨️ Genereer alle piklijsten", type="primary", use_container_width=True):
+if st.button("🖨️ Genereer alle picklijsten", type="primary", use_container_width=True):
     pad_groepen = _parse_pad_groepen(st.session_state.get("pad_groepen_tekst", ""))
 
     artikelen_db = laad_artikelen()
@@ -141,7 +141,7 @@ if st.button("🖨️ Genereer alle piklijsten", type="primary", use_container_w
     alle_dbo     = laad_alle_dbo_bestellingen()
     alle_sap     = laad_alle_sap()
 
-    piklijsten = {}   # {winkelnaam: pdf_bytes}
+    picklijsten = {}   # {winkelnaam: pdf_bytes}
     n_gemaakt = 0
     alle_pads = set()
     pad_conflicten = []  # (winkelnaam, artikel) — EAN-pad wijkt af van sectie-pad
@@ -164,11 +164,11 @@ if st.button("🖨️ Genereer alle piklijsten", type="primary", use_container_w
         )
 
         # PDF genereren met pad-groepen
-        pdf_bytes = schrijf_piklijst_pdf(winkelnaam, artikelen, pad_groepen=pad_groepen)
-        piklijsten[winkelnaam] = pdf_bytes
+        pdf_bytes = schrijf_picklijst_pdf(winkelnaam, artikelen, pad_groepen=pad_groepen)
+        picklijsten[winkelnaam] = pdf_bytes
 
         # Correcties opslaan in database (startpunt voor Stap 2)
-        sla_piklijst_correcties_op(winkelnaam, artikelen)
+        sla_picklijst_correcties_op(winkelnaam, artikelen)
 
         # ✨ Orderhistorie opslaan (snapshot vóór reset)
         sla_order_history_op(winkelnaam, artikelen)
@@ -190,11 +190,11 @@ if st.button("🖨️ Genereer alle piklijsten", type="primary", use_container_w
     if n_gemaakt == 0:
         st.warning("Geen bestellingen gevonden. Winkels moeten eerst hun bestelling invullen.")
     else:
-        st.session_state["piklijsten_pdf"] = piklijsten
+        st.session_state["picklijsten_pdf"] = picklijsten
         if pad_groepen:
             groep_labels = " | ".join(", ".join(g) for g in pad_groepen)
             st.info(f"Pad-groepen toegepast: {groep_labels}")
-        st.success(f"✅ {n_gemaakt} piklijst(en) gegenereerd. Download hieronder per winkel of allemaal tegelijk.")
+        st.success(f"✅ {n_gemaakt} picklijst(en) gegenereerd. Download hieronder per winkel of allemaal tegelijk.")
 
         # ✨ Dubbele check: EAN-pad vs sectie-pad — meld tegenstrijdigheden
         if pad_conflicten:
@@ -207,27 +207,27 @@ if st.button("🖨️ Genereer alle piklijsten", type="primary", use_container_w
                     st.write(f"**{winkelnaam}** — {a['artikel']} (EAN {a['ean']}, sectie *{a['sectie']}*) → pad **{a['pad_code']}**")
 
 # Download-knoppen per winkel + zip
-if "piklijsten_pdf" in st.session_state:
-    piklijsten = st.session_state["piklijsten_pdf"]
-    st.caption(f"**{len(piklijsten)} piklijst(en) beschikbaar:**")
-    cols = st.columns(min(len(piklijsten), 4))
-    for i, (winkelnaam, pdf_bytes) in enumerate(sorted(piklijsten.items())):
+if "picklijsten_pdf" in st.session_state:
+    picklijsten = st.session_state["picklijsten_pdf"]
+    st.caption(f"**{len(picklijsten)} picklijst(en) beschikbaar:**")
+    cols = st.columns(min(len(picklijsten), 4))
+    for i, (winkelnaam, pdf_bytes) in enumerate(sorted(picklijsten.items())):
         with cols[i % len(cols)]:
             st.download_button(
                 label=f"⬇️ {winkelnaam}",
                 data=pdf_bytes,
-                file_name=f"{winkelnaam}_PIKLIJST.pdf",
+                file_name=f"{winkelnaam}_Picklijst.pdf",
                 mime="application/pdf",
                 use_container_width=True,
                 key=f"dl_pik_{winkelnaam}",
             )
-    # ✨ Zip-download alle piklijsten
-    if len(piklijsten) > 1:
-        zip_bytes = maak_zip(piklijsten, "_PIKLIJST")
+    # ✨ Zip-download alle picklijsten
+    if len(picklijsten) > 1:
+        zip_bytes = maak_zip(picklijsten, "_Picklijst")
         st.download_button(
-            label=f"📦 Download ALLE piklijsten als zip ({len(piklijsten)} bestanden)",
+            label=f"📦 Download ALLE picklijsten als zip ({len(picklijsten)} bestanden)",
             data=zip_bytes,
-            file_name="alle_piklijsten.zip",
+            file_name="alle_picklijsten.zip",
             mime="application/zip",
             use_container_width=True,
             key="dl_pik_zip",
@@ -245,7 +245,7 @@ st.caption(
 winkels_met_corr = laad_winkels_met_correcties()
 
 if not winkels_met_corr:
-    st.info("Nog geen piklijsten gegenereerd. Voer eerst Stap 1 uit.")
+    st.info("Nog geen picklijsten gegenereerd. Voer eerst Stap 1 uit.")
 else:
     gekozen_winkel = st.selectbox(
         "Kies winkel (typ om te zoeken):",
@@ -296,7 +296,7 @@ else:
                 hdr[0].markdown("**Pad**")
                 hdr[1].markdown("**Sectie**")
                 hdr[2].markdown("**Artikel**")
-                hdr[3].markdown("**Piklijst**")
+                hdr[3].markdown("**Picklijst**")
                 hdr[4].markdown("**Definitief**")
                 st.markdown("<hr style='margin:4px 0'>", unsafe_allow_html=True)
 
@@ -336,7 +336,7 @@ st.caption(
 winkels_paklijst = laad_winkels_met_correcties()
 
 if not winkels_paklijst:
-    st.info("Nog geen piklijsten gegenereerd. Voer eerst Stap 1 uit.")
+    st.info("Nog geen picklijsten gegenereerd. Voer eerst Stap 1 uit.")
 else:
     col_pak1, col_pak2 = st.columns([2, 1])
     with col_pak1:
@@ -431,7 +431,7 @@ else:
             if st.button("Ja, wis bestellingen", type="primary", use_container_width=True):
                 reset_winkel_bestellingen(te_wissen)
                 st.cache_data.clear()
-                for k in ["piklijsten_pdf", "paklijsten_pdf", "_te_wissen"]:
+                for k in ["picklijsten_pdf", "paklijsten_pdf", "_te_wissen"]:
                     st.session_state.pop(k, None)
                 st.success(f"✅ Gewist: {', '.join(te_wissen)}")
                 st.rerun()
@@ -454,7 +454,7 @@ st.markdown("---")
 # ─── Orderhistoriek ───────────────────────────────────────────────────────────
 st.subheader("📜 Orderhistoriek")
 st.caption(
-    "Overzicht van alle gegenereerde piklijsten. "
+    "Overzicht van alle gegenereerde picklijsten. "
     "De data blijft bewaard na een reset, zodat je altijd kunt terugkijken."
 )
 
@@ -500,7 +500,7 @@ else:
     })
     df = df[["Winkel", "Datum", "Week", "Jaar", "Stuks", "Regels"]]
     st.dataframe(df, use_container_width=True, hide_index=True)
-    st.caption(f"{len(history)} piklijst-generaties weergegeven.")
+    st.caption(f"{len(history)} picklijst-generaties weergegeven.")
 
 # ── Historiek wissen ──────────────────────────────────────────────────────────
 with st.expander("🗑️ Historiek wissen", expanded=False):
