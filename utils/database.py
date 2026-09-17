@@ -188,6 +188,7 @@ def _importeer_artikelen_rows(lezer) -> int:
 
 
 # ─── Bestellingen lezen ───────────────────────────────────────────────────────
+@st.cache_data(ttl=60)
 def laad_bestelling(winkelnaam: str) -> dict:
     resp = (
         _sb().table("store_orders")
@@ -257,6 +258,7 @@ def sla_bestelling_op(winkelnaam: str, orders: dict):
     ]
     if rijen:
         sb.table("store_orders").insert(rijen).execute()
+    laad_bestelling.clear()
     update_order_status(winkelnaam, "besteld")
 
 
@@ -473,13 +475,10 @@ def reset_winkel_bestellingen(winkel_namen: list):
     for naam in winkel_namen:
         sb.table("store_orders").delete().eq("store_name", naam).execute()
         sb.table("dbo_orders").delete().eq("store_name", naam).execute()
-        # Piklijst-correcties en SAP-data horen bij de net gewiste bestelcyclus —
-        # zonder dit blijven Stap 2/3 en de piklijst-generatie oude regels/aanvullingen
-        # tonen na het wissen, want beide worden anders pas overschreven bij de
-        # VOLGENDE piklijst-generatie resp. SAP-upload voor die winkel, niet bij het
-        # wissen zelf.
         sb.table("piklijst_correcties").delete().eq("winkelnaam", naam).execute()
         sb.table("sap_data").delete().eq("store_name", naam).execute()
+    laad_bestelling.clear()
+    laad_dbo_bestelling.clear()
     for naam in winkel_namen:
         update_order_status(naam, "geen_bestelling")
 
@@ -496,8 +495,6 @@ def reset_en_laad_buffer(winkel_namen: list):
         buffer = laad_buffer(naam)
         sb.table("store_orders").delete().eq("store_name", naam).execute()
         sb.table("dbo_orders").delete().eq("store_name", naam).execute()
-        sb.table("piklijst_correcties").delete().eq("winkelnaam", naam).execute()
-        sb.table("sap_data").delete().eq("store_name", naam).execute()
         if buffer:
             rijen = [
                 {"store_name": naam, "ean": ean, "quantity": qty}
@@ -509,6 +506,8 @@ def reset_en_laad_buffer(winkel_namen: list):
             update_order_status(naam, "besteld")
         else:
             update_order_status(naam, "geen_bestelling")
+    laad_bestelling.clear()
+    laad_dbo_bestelling.clear()
 
 
 # ─── Order-buffer (vorige bestelling onthouden na wissen) ─────────────────────
